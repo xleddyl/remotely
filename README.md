@@ -1,4 +1,6 @@
-# Remotely
+<p align="center">
+  <img src="docs/logo.png" alt="Remotely" width="420">
+</p>
 
 Turn an iPhone or iPad into an extra display for your Mac, over WiFi or any
 network you can reach the Mac on (Tailscale, VPN).

@@ -26,8 +26,7 @@ struct RemotelyMacApp: App {
         )) {
             ContentView(controller: controller)
         } label: {
-            Image(systemName: controller.running
-                  ? "rectangle.on.rectangle.fill" : "rectangle.on.rectangle")
+            Image(controller.running ? "MenuBarIconFill" : "MenuBarIcon")
         }
         .menuBarExtraStyle(.window)
     }

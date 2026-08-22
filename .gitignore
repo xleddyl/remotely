@@ -26,3 +26,6 @@ newnewicon.png
 # Local developer config (signing team etc.)
 .env
 .claude/
+
+# Release artifacts
+dist/

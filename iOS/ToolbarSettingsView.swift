@@ -134,7 +134,7 @@ struct AddToolbarItemView: View {
                 Spacer(minLength: 0)
                 Image(systemName: "plus.circle.fill")
                     .font(.system(size: 18))
-                    .foregroundStyle(Color.accentColor)
+                    .foregroundStyle(.secondary)
                     .accessibilityHidden(true)
             }
             .padding(.vertical, 2)
@@ -250,10 +250,16 @@ struct CustomShortcutView: View {
             Image(systemName: name)
                 .font(.system(size: 16, weight: .medium))
                 .frame(width: 42, height: 38)
-                .foregroundStyle(active ? Color.white : Color.primary)
+                .foregroundStyle(Color.primary)
                 .background(RoundedRectangle(cornerRadius: 9, style: .continuous)
-                    .fill(active ? AnyShapeStyle(Color.accentColor)
+                    .fill(active ? AnyShapeStyle(Color(.systemFill))
                                  : AnyShapeStyle(Color(.tertiarySystemFill))))
+                .overlay {
+                    if active {
+                        RoundedRectangle(cornerRadius: 9, style: .continuous)
+                            .strokeBorder(Color.primary.opacity(0.35), lineWidth: 1.5)
+                    }
+                }
         }
         .buttonStyle(.plain)
         .accessibilityLabel(name)

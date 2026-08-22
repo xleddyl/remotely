@@ -15,7 +15,7 @@ struct PerfOverlay: View {
                     .font(.system(size: 12, weight: .bold, design: .monospaced))
                     .padding(.horizontal, 8)
                     .padding(.vertical, 3)
-                    .background(stats.transport == "WiFi" ? Color.blue.opacity(0.4)
+                    .background(stats.transport == "WiFi" ? Color.accentColor.opacity(0.4)
                                 : Color.gray.opacity(0.3),
                                 in: Capsule())
                     .foregroundStyle(.white)

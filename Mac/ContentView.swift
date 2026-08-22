@@ -1,8 +1,8 @@
 import SwiftUI
 
 struct ContentView: View {
-    static let panelWidth: CGFloat = 440
-    static let panelHeight: CGFloat = 540
+    static let panelWidth: CGFloat = 360
+    static let panelHeight: CGFloat = 500
 
     @ObservedObject var controller: SenderController
     @StateObject private var permissions = PermissionMonitor()

@@ -8,6 +8,68 @@ func keyWindowSafeAreaInsets() -> UIEdgeInsets {
         .first { $0.isKeyWindow }?.safeAreaInsets ?? .zero
 }
 
+enum ToolbarHaptics {
+    static let selectionHaptics = UISelectionFeedbackGenerator()
+    static let impactHaptics = UIImpactFeedbackGenerator(style: .rigid)
+}
+
+enum ToolbarMotion {
+    static let expand = Animation.spring(response: 0.32, dampingFraction: 0.86)
+}
+
+extension View {
+
+    @ViewBuilder
+    func liquidGlass<S: InsettableShape>(in shape: S, tint: Color? = nil,
+                                         interactive: Bool = true) -> some View {
+        if #available(iOS 26.0, *) {
+            if let tint {
+                glassEffect(.regular.tint(tint).interactive(interactive), in: shape)
+            } else {
+                glassEffect(.regular.interactive(interactive), in: shape)
+            }
+        } else {
+            background {
+                ZStack {
+                    shape.fill(.ultraThinMaterial)
+                    if let tint { shape.fill(tint.opacity(0.85)) }
+                }
+            }
+            .overlay(shape.strokeBorder(Color.primary.opacity(0.08)))
+        }
+    }
+
+    @ViewBuilder
+    func scrollClipDisabledIfNeeded() -> some View {
+        if #available(iOS 17.0, *) {
+            scrollClipDisabled()
+        } else {
+            self
+        }
+    }
+}
+
+struct ToolbarGlassRow<Content: View>: View {
+
+    private let spacing: CGFloat
+    private let content: Content
+
+    init(spacing: CGFloat, @ViewBuilder content: () -> Content) {
+        self.spacing = spacing
+        self.content = content()
+    }
+
+    var body: some View {
+        if #available(iOS 26.0, *) {
+            GlassEffectContainer(spacing: spacing) {
+                HStack(spacing: spacing) { content }
+            }
+        } else {
+            HStack(spacing: spacing) { content }
+        }
+    }
+}
+
 final class InputController: ObservableObject {
 
     @Published private(set) var latched: WireModifiers = []
@@ -254,16 +316,12 @@ struct InputToolbar: View {
     @State private var windowInsets = UIEdgeInsets.zero
     @State private var velocitySampler = DragVelocitySampler()
     @State private var settle = ToolbarSettle()
-    @State private var haptics = UISelectionFeedbackGenerator()
 
-    private static let handleSize = CGSize(width: 46, height: 38)
+    private static let handleDiameter: CGFloat = 44
     private static let dragSpace = "inputToolbarDragSpace"
     private static let dragSlop: CGFloat = 10
     private static let flickProjection: CGFloat = 0.5
-    private static let expandDuration: Double = 0.18
-    private static let chipSize = CGSize(width: 36, height: 32)
-    private static let chipRadius: CGFloat = 10
-    private static let handleRadius: CGFloat = 13
+    private static let chipDiameter: CGFloat = 38
     private static let chipAnimation = Animation.spring(response: 0.28, dampingFraction: 0.82)
 
     private static let modifierChips: [(WireModifiers, String, String)] = [
@@ -325,7 +383,7 @@ struct InputToolbar: View {
     @ViewBuilder
     private var latchedChips: some View {
         if supported {
-            HStack(spacing: 7) {
+            ToolbarGlassRow(spacing: 7) {
                 ForEach(Self.modifierChips, id: \.1) { modifier, glyph, name in
                     if controller.isLatched(modifier) {
                         modifierChip(modifier, glyph: glyph, name: name)
@@ -335,7 +393,7 @@ struct InputToolbar: View {
                     softKeyboardChip
                 }
             }
-            .frame(height: Self.handleSize.height)
+            .frame(height: Self.handleDiameter)
             .environment(\.layoutDirection, .leftToRight)
             .animation(Self.chipAnimation, value: controller.latched)
             .animation(Self.chipAnimation, value: controller.softKeyboardVisible)
@@ -348,22 +406,16 @@ struct InputToolbar: View {
         .scale(scale: 0.4, anchor: chipAnchor).combined(with: .opacity)
     }
 
-    private var chipShape: RoundedRectangle {
-        RoundedRectangle(cornerRadius: Self.chipRadius, style: .continuous)
-    }
-
     private func modifierChip(_ modifier: WireModifiers, glyph: String, name: String) -> some View {
         Button {
-            UISelectionFeedbackGenerator().selectionChanged()
+            ToolbarHaptics.selectionHaptics.selectionChanged()
             controller.toggleLatch(modifier)
         } label: {
             Text(glyph)
                 .font(.system(size: 16, weight: .semibold))
-                .frame(width: Self.chipSize.width, height: Self.chipSize.height)
+                .frame(width: Self.chipDiameter, height: Self.chipDiameter)
                 .foregroundStyle(Color.white)
-                .background(chipShape.fill(Color.accentColor))
-                .overlay(chipShape.strokeBorder(Color.primary.opacity(0.08)))
-                .shadow(color: .black.opacity(0.22), radius: 5, y: 2)
+                .liquidGlass(in: Circle(), tint: .accentColor)
         }
         .buttonStyle(.plain)
         .transition(chipTransition)
@@ -373,16 +425,14 @@ struct InputToolbar: View {
 
     private var softKeyboardChip: some View {
         Button {
-            UISelectionFeedbackGenerator().selectionChanged()
+            ToolbarHaptics.selectionHaptics.selectionChanged()
             controller.setSoftKeyboardVisible(false)
         } label: {
             Image(systemName: "keyboard.chevron.compact.down")
                 .font(.system(size: 15, weight: .medium))
-                .frame(width: Self.chipSize.width, height: Self.chipSize.height)
+                .frame(width: Self.chipDiameter, height: Self.chipDiameter)
                 .foregroundStyle(.primary)
-                .background(chipShape.fill(.ultraThinMaterial))
-                .overlay(chipShape.strokeBorder(Color.primary.opacity(0.08)))
-                .shadow(color: .black.opacity(0.22), radius: 5, y: 2)
+                .liquidGlass(in: Circle())
         }
         .buttonStyle(.plain)
         .transition(chipTransition)
@@ -391,15 +441,13 @@ struct InputToolbar: View {
     }
 
     private func handle(in size: CGSize) -> some View {
-        let shape = RoundedRectangle(cornerRadius: Self.handleRadius, style: .continuous)
-        return Image(systemName: "slider.horizontal.3")
+        Image(systemName: "slider.horizontal.3")
             .font(.system(size: 16, weight: .semibold))
-            .frame(width: Self.handleSize.width, height: Self.handleSize.height)
+            .frame(width: Self.handleDiameter, height: Self.handleDiameter)
             .foregroundStyle(handleTint)
-            .background(shape.fill(.regularMaterial))
-            .overlay(shape.strokeBorder(Color.primary.opacity(0.08)))
+            .liquidGlass(in: Circle())
             .shadow(color: .black.opacity(0.28), radius: 10, y: 4)
-            .contentShape(shape)
+            .contentShape(Circle())
             .scaleEffect(dragging ? 1.12 : 1)
             .animation(.easeOut(duration: 0.12), value: dragging)
             .environment(\.layoutDirection, .leftToRight)
@@ -420,12 +468,12 @@ struct InputToolbar: View {
                     settle.stop()
                     dragBase = dragOffset
                     velocitySampler.begin(translation: value.translation, at: value.time)
-                    haptics.prepare()
+                    ToolbarHaptics.selectionHaptics.prepare()
                 }
                 if !dragging,
                    hypot(value.translation.width, value.translation.height) > Self.dragSlop {
                     dragging = true
-                    haptics.selectionChanged()
+                    ToolbarHaptics.selectionHaptics.selectionChanged()
                 }
                 dragOffset = offset(for: value.translation)
             }
@@ -437,7 +485,7 @@ struct InputToolbar: View {
                 dragOffset = released
                 guard dragging else {
                     settle.start(from: released, velocity: .zero) { dragOffset = $0 }
-                    withAnimation(.easeOut(duration: Self.expandDuration)) {
+                    withAnimation(ToolbarMotion.expand) {
                         controller.expanded.toggle()
                     }
                     return
@@ -471,18 +519,25 @@ struct InputToolbar: View {
 
     private func dockedHandleCenter(for corner: ToolbarCorner, in size: CGSize) -> CGPoint {
         let insets = dockInsets(for: corner)
-        let halfWidth = Self.handleSize.width / 2
-        let halfHeight = Self.handleSize.height / 2
+        let half = Self.handleDiameter / 2
         return CGPoint(
-            x: corner.isLeading ? insets.leading + halfWidth
-                                : size.width - insets.trailing - halfWidth,
-            y: corner.isTop ? insets.top + halfHeight
-                            : size.height - insets.bottom - halfHeight)
+            x: corner.isLeading ? insets.leading + half
+                                : size.width - insets.trailing - half,
+            y: corner.isTop ? insets.top + half
+                            : size.height - insets.bottom - half)
     }
 
     private var handleTint: Color {
         if !supported { return .orange }
         return controller.latched.isEmpty ? .primary : .accentColor
+    }
+}
+
+struct ToolbarChipButtonStyle: ButtonStyle {
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .scaleEffect(configuration.isPressed ? 1.08 : 1)
+            .animation(.spring(response: 0.2, dampingFraction: 0.6), value: configuration.isPressed)
     }
 }
 
@@ -500,42 +555,66 @@ struct DockedInputBar: View {
 
     private static let buttonHeight: CGFloat = 34
     private static let buttonWidth: CGFloat = 40
-    private static let radius: CGFloat = 9
+    private static let collapseDiameter: CGFloat = 44
+    private static let spacing: CGFloat = 7
+    private static let fadeWidth: CGFloat = 16
+    private static let chipVerticalPadding: CGFloat = 6
+    private static let scrollerHeight: CGFloat = collapseDiameter + chipVerticalPadding * 2
+    private static let containerVerticalPadding: CGFloat = 4
 
-    private var shape: RoundedRectangle {
-        RoundedRectangle(cornerRadius: Self.radius, style: .continuous)
+    private var chipShape: Capsule { Capsule(style: .continuous) }
+
+    private var barShape: RoundedRectangle {
+        RoundedRectangle(cornerRadius: 26, style: .continuous)
     }
 
     var body: some View {
-        HStack(spacing: 7) {
+        HStack(spacing: Self.spacing) {
             collapseButton
             if supported {
-                keyboardButton
-                separator
-                ScrollView(.horizontal, showsIndicators: false) {
-                    HStack(spacing: 7) {
-                        ForEach(actions.items) { item in
-                            itemView(item)
-                        }
-                    }
-                    .padding(.horizontal, 2)
-                }
-                .frame(height: Self.buttonHeight)
-                separator
+                actionScroller
             } else {
                 unsupportedNote
+                settingsButton
+                disconnectButton
             }
-            keyButton(symbol: "gearshape", action: openSettings)
-                .accessibilityLabel("Settings")
-            disconnectButton
         }
-        .padding(.horizontal, 12)
-        .padding(.top, 10)
-        .padding(.bottom, 10 + bottomInset)
+        .padding(.horizontal, 10)
+        .padding(.vertical, Self.containerVerticalPadding)
         .frame(maxWidth: .infinity)
-        .background(.regularMaterial)
-        .overlay(alignment: .top) { Divider() }
+        .liquidGlass(in: barShape, interactive: false)
+        .padding(.horizontal, 10)
+        .padding(.bottom, max(bottomInset, 10))
         .environment(\.colorScheme, .dark)
+    }
+
+    private var actionScroller: some View {
+        ScrollView(.horizontal, showsIndicators: false) {
+            ToolbarGlassRow(spacing: Self.spacing) {
+                keyboardButton
+                ForEach(actions.items) { item in
+                    itemView(item)
+                }
+                separator
+                settingsButton
+                disconnectButton
+            }
+            .padding(.horizontal, 8)
+            .padding(.vertical, Self.chipVerticalPadding)
+        }
+        .scrollClipDisabledIfNeeded()
+        .frame(height: Self.scrollerHeight)
+        .mask { scrollFade }
+    }
+
+    private var scrollFade: some View {
+        HStack(spacing: 0) {
+            LinearGradient(colors: [.clear, .black], startPoint: .leading, endPoint: .trailing)
+                .frame(width: Self.fadeWidth)
+            Color.black
+            LinearGradient(colors: [.black, .clear], startPoint: .leading, endPoint: .trailing)
+                .frame(width: Self.fadeWidth)
+        }
     }
 
     @ViewBuilder
@@ -580,7 +659,7 @@ struct DockedInputBar: View {
         let glyph = (symbol ?? "").trimmingCharacters(in: .whitespaces)
         let title = (label ?? "").trimmingCharacters(in: .whitespaces)
         let tap = {
-            UISelectionFeedbackGenerator().selectionChanged()
+            ToolbarHaptics.selectionHaptics.selectionChanged()
             controller.tapCombo(mods: mods, key: key)
         }
         return Group {
@@ -595,15 +674,19 @@ struct DockedInputBar: View {
 
     private var collapseButton: some View {
         Button(action: collapse) {
-            Image(systemName: "slider.horizontal.3")
-                .font(.subheadline.weight(.semibold))
-                .frame(width: 46, height: Self.buttonHeight)
+            Image(systemName: "chevron.down")
+                .font(.system(size: 16, weight: .semibold))
+                .frame(width: Self.collapseDiameter, height: Self.collapseDiameter)
                 .foregroundStyle(controller.latched.isEmpty ? Color.primary : Color.accentColor)
-                .background(shape.fill(Color(.tertiarySystemFill)))
-                .overlay(shape.strokeBorder(Color.primary.opacity(0.06)))
+                .liquidGlass(in: Circle())
         }
         .buttonStyle(.plain)
         .accessibilityLabel("Hide input controls")
+    }
+
+    private var settingsButton: some View {
+        keyButton(symbol: "gearshape", action: openSettings)
+            .accessibilityLabel("Settings")
     }
 
     private var keyboardButton: some View {
@@ -634,20 +717,11 @@ struct DockedInputBar: View {
             .accessibilityHidden(true)
     }
 
-    @ViewBuilder
-    private func chipBackground(active: Bool) -> some View {
-        ZStack {
-            shape.fill(active ? AnyShapeStyle(Color.accentColor)
-                              : AnyShapeStyle(Color(.tertiarySystemFill)))
-            shape.strokeBorder(Color.primary.opacity(active ? 0.08 : 0.06))
-        }
-    }
-
     private func modifierButton(_ modifier: WireModifiers, glyph: String, name: String) -> some View {
         let active = controller.isLatched(modifier)
         return Button {
             controller.toggleLatch(modifier)
-            UISelectionFeedbackGenerator().selectionChanged()
+            ToolbarHaptics.selectionHaptics.selectionChanged()
         } label: {
             Text(glyph)
                 .font(.body.weight(.medium))
@@ -655,9 +729,9 @@ struct DockedInputBar: View {
                 .minimumScaleFactor(0.7)
                 .frame(width: Self.buttonWidth, height: Self.buttonHeight)
                 .foregroundStyle(active ? Color.white : Color.primary)
-                .background(chipBackground(active: active))
+                .liquidGlass(in: chipShape, tint: active ? .accentColor : nil, interactive: false)
         }
-        .buttonStyle(.plain)
+        .buttonStyle(ToolbarChipButtonStyle())
         .accessibilityLabel(name)
         .accessibilityAddTraits(active ? [.isSelected] : [])
     }
@@ -672,9 +746,9 @@ struct DockedInputBar: View {
                 .frame(minWidth: Self.buttonWidth, minHeight: Self.buttonHeight,
                        maxHeight: Self.buttonHeight)
                 .foregroundStyle(Color.primary)
-                .background(chipBackground(active: false))
+                .liquidGlass(in: chipShape, interactive: false)
         }
-        .buttonStyle(.plain)
+        .buttonStyle(ToolbarChipButtonStyle())
     }
 
     private func keyButton(symbol: String, active: Bool = false,
@@ -684,14 +758,14 @@ struct DockedInputBar: View {
                 .font(.subheadline.weight(.medium))
                 .frame(width: Self.buttonWidth, height: Self.buttonHeight)
                 .foregroundStyle(active ? Color.white : Color.primary)
-                .background(chipBackground(active: active))
+                .liquidGlass(in: chipShape, tint: active ? .accentColor : nil, interactive: false)
         }
-        .buttonStyle(.plain)
+        .buttonStyle(ToolbarChipButtonStyle())
     }
 
     private var disconnectButton: some View {
         Button {
-            UIImpactFeedbackGenerator(style: .rigid).impactOccurred()
+            ToolbarHaptics.impactHaptics.impactOccurred()
             controller.reset()
             disconnect()
         } label: {
@@ -699,9 +773,9 @@ struct DockedInputBar: View {
                 .font(.subheadline.weight(.semibold))
                 .frame(width: Self.buttonWidth, height: Self.buttonHeight)
                 .foregroundStyle(Color.white)
-                .background(shape.fill(Color.red))
+                .liquidGlass(in: chipShape, tint: .red, interactive: false)
         }
-        .buttonStyle(.plain)
+        .buttonStyle(ToolbarChipButtonStyle())
         .accessibilityLabel("Disconnect")
         .accessibilityHint("Ends the session and returns to the Mac list")
     }
@@ -710,7 +784,7 @@ struct DockedInputBar: View {
         let active = touchInputMode == "pointer"
         return keyButton(symbol: "cursorarrow", active: active) {
             touchInputMode = active ? "direct" : "pointer"
-            UISelectionFeedbackGenerator().selectionChanged()
+            ToolbarHaptics.selectionHaptics.selectionChanged()
         }
         .accessibilityLabel("Pointer mode")
         .accessibilityAddTraits(active ? [.isSelected] : [])

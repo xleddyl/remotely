@@ -55,6 +55,11 @@ final class MacBrowser: ObservableObject {
         }
     }
 
+    func refresh() {
+        DispatchQueue.main.async { self.macs = [] }
+        queue.async { self.restart() }
+    }
+
     private func restart() {
         browser?.cancel()
         browser = nil

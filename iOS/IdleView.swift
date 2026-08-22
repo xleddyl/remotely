@@ -1,19 +1,5 @@
 import SwiftUI
 
-struct SettingsIcon: View {
-    let symbol: String
-    var tint: Color = .accentColor
-
-    var body: some View {
-        Image(systemName: symbol)
-            .font(.system(size: 14, weight: .semibold))
-            .foregroundStyle(Color.white)
-            .frame(width: 29, height: 29)
-            .background(tint.gradient, in: RoundedRectangle(cornerRadius: 7, style: .continuous))
-            .accessibilityHidden(true)
-    }
-}
-
 struct GroupedCard<Content: View>: View {
     @ViewBuilder var content: Content
 
@@ -80,6 +66,24 @@ struct GroupedRowDivider: View {
     }
 }
 
+struct BrandMark: View {
+    let size: CGFloat
+
+    var body: some View {
+        ZStack(alignment: .topLeading) {
+            Circle()
+                .fill(Color(red: 78/255, green: 117/255, blue: 1.0))
+                .frame(width: size * 65/84, height: size * 65/84)
+            Circle()
+                .fill(Color(red: 10/255, green: 22/255, blue: 83/255))
+                .frame(width: size * 65/84, height: size * 65/84)
+                .offset(x: size * 19/84, y: size * 19/84)
+        }
+        .frame(width: size, height: size)
+        .accessibilityHidden(true)
+    }
+}
+
 // MARK: - Idle view (no Mac connected), regular iOS look, follows light/dark
 
 struct IdleView: View {
@@ -110,52 +114,31 @@ struct IdleView: View {
             .padding(.top, 28)
             .padding(.bottom, 36)
         }
+        .refreshable {
+            browser.refresh()
+            try? await Task.sleep(nanoseconds: 800_000_000)
+        }
         .background(Color(.systemGroupedBackground))
         .scrollDismissesKeyboard(.interactively)
     }
 
     private var header: some View {
-        VStack(spacing: 18) {
-            Image("AppLogo")
-                .resizable()
-                .scaledToFit()
-                .frame(width: 96, height: 96)
-                .clipShape(RoundedRectangle(cornerRadius: 21, style: .continuous))
-                .overlay {
-                    RoundedRectangle(cornerRadius: 21, style: .continuous)
-                        .strokeBorder(Color.primary.opacity(0.08))
-                }
-                .shadow(color: .black.opacity(0.18), radius: 14, y: 8)
-                .accessibilityHidden(true)
-
-            VStack(spacing: 6) {
-                Text("Remotely")
-                    .font(.largeTitle.bold())
-                Text("A second screen for your Mac")
-                    .font(.subheadline)
-                    .foregroundStyle(.secondary)
+        HStack(spacing: 10) {
+            BrandMark(size: 30)
+            Text("Remotely")
+                .font(.custom("MontserratAlternates-Bold", size: 30, relativeTo: .largeTitle))
+            Spacer(minLength: 8)
+            Button {
+                showSettings = true
+            } label: {
+                Image(systemName: "gearshape")
+                    .font(.title3)
+                    .foregroundStyle(.primary)
+                    .frame(width: 44, height: 44, alignment: .trailing)
+                    .contentShape(Rectangle())
             }
-
-            statusPill
+            .accessibilityLabel("Settings")
         }
-        .multilineTextAlignment(.center)
-        .padding(.bottom, 4)
-    }
-
-    private var statusPill: some View {
-        HStack(spacing: 8) {
-            StatusBeacon(color: receiver.connected ? .green : .orange)
-            Text(receiver.status)
-                .font(.footnote.weight(.medium))
-                .foregroundStyle(.secondary)
-                .lineLimit(1)
-        }
-        .padding(.leading, 12)
-        .padding(.trailing, 16)
-        .padding(.vertical, 8)
-        .background(Color(.secondarySystemGroupedBackground), in: Capsule())
-        .accessibilityElement(children: .combine)
-        .accessibilityLabel("Status: \(receiver.status)")
     }
 
     private var macList: some View {
@@ -166,7 +149,7 @@ struct IdleView: View {
                     searchingRow
                 } else {
                     ForEach(Array(browser.macs.enumerated()), id: \.element.id) { index, mac in
-                        if index > 0 { GroupedRowDivider() }
+                        if index > 0 { GroupedRowDivider(inset: 52) }
                         macRow(mac)
                     }
                 }
@@ -176,19 +159,19 @@ struct IdleView: View {
 
     private var searchingRow: some View {
         HStack(spacing: 12) {
-            ZStack {
+            Group {
                 if browser.searching {
                     ProgressView().controlSize(.regular)
                 } else {
                     Image(systemName: "wifi.exclamationmark")
-                        .font(.system(size: 16, weight: .semibold))
-                        .foregroundStyle(.orange)
+                        .font(.body)
+                        .foregroundStyle(.secondary)
                 }
             }
-            .frame(width: 29, height: 29)
+            .frame(width: 24, alignment: .leading)
 
-            Text("Looking for Macs. Open Remotely on your Mac and keep it running.")
-                .font(.subheadline)
+            Text("Open Remotely on your Mac to see it here.")
+                .font(.body)
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
                 .frame(maxWidth: .infinity, alignment: .leading)
@@ -202,26 +185,21 @@ struct IdleView: View {
             model.connect(to: mac)
         } label: {
             HStack(spacing: 12) {
-                SettingsIcon(symbol: "laptopcomputer")
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(mac.name)
-                        .font(.body)
-                        .foregroundStyle(.primary)
-                        .lineLimit(1)
-                    Text("On this network")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
+                Image(systemName: "laptopcomputer")
+                    .font(.body.weight(.regular))
+                    .foregroundStyle(.secondary)
+                    .frame(width: 24, alignment: .leading)
+                Text(mac.name)
+                    .font(.body)
+                    .foregroundStyle(.primary)
+                    .lineLimit(1)
                 Spacer(minLength: 8)
-                Text("Connect")
-                    .font(.subheadline.weight(.semibold))
-                    .foregroundStyle(Color.white)
-                    .padding(.horizontal, 14)
-                    .padding(.vertical, 7)
-                    .background(Color.accentColor, in: Capsule())
+                Image(systemName: "chevron.right")
+                    .font(.footnote)
+                    .foregroundStyle(.tertiary)
             }
             .padding(.horizontal, 16)
-            .padding(.vertical, 11)
+            .padding(.vertical, 14)
         }
         .buttonStyle(GroupedRowButtonStyle())
         .disabled(!receiver.isIdle)
@@ -266,7 +244,6 @@ struct IdleView: View {
             withAnimation(.easeInOut(duration: 0.2)) { showAddressFields.toggle() }
         } label: {
             HStack(spacing: 12) {
-                SettingsIcon(symbol: "network", tint: .indigo)
                 Text("Connect by address")
                     .font(.body)
                     .foregroundStyle(.primary)
@@ -310,37 +287,12 @@ struct IdleView: View {
     }
 
     private var footer: some View {
-        VStack(spacing: 12) {
-            Button {
-                showSettings = true
-            } label: {
-                Label("Settings & Help", systemImage: "gearshape")
-                    .font(.body.weight(.medium))
-                    .frame(maxWidth: .infinity)
-            }
-            .buttonStyle(.bordered)
-            .controlSize(.large)
-
-            Text("Shake your \(deviceKind) to open settings anytime")
-                .font(.footnote)
-                .foregroundStyle(.tertiary)
-                .multilineTextAlignment(.center)
-        }
-        .padding(.top, 4)
-    }
-}
-
-struct StatusBeacon: View {
-    let color: Color
-    var size: CGFloat = 8
-
-    var body: some View {
-        Circle()
-            .fill(color)
-            .frame(width: size, height: size)
-            .padding(4)
-            .background(Circle().fill(color.opacity(0.22)))
-            .accessibilityHidden(true)
+        Text("Shake your \(deviceKind) to open settings anytime")
+            .font(.footnote)
+            .foregroundStyle(.tertiary)
+            .multilineTextAlignment(.center)
+            .frame(maxWidth: .infinity)
+            .padding(.top, 4)
     }
 }
 

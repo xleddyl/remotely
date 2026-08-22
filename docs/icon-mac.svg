@@ -1,0 +1,20 @@
+<svg width="1024" height="1024" viewBox="0 0 1024 1024" fill="none" xmlns="http://www.w3.org/2000/svg">
+<defs>
+<filter id="shadow" x="-10%" y="-10%" width="120%" height="120%">
+<feGaussianBlur in="SourceAlpha" stdDeviation="12" result="blur"/>
+<feOffset in="blur" dx="0" dy="10" result="offsetblur"/>
+<feFlood flood-color="#000000" flood-opacity="0.3" result="flood"/>
+<feComposite in="flood" in2="offsetblur" operator="in" result="shadowmask"/>
+<feMerge>
+<feMergeNode in="shadowmask"/>
+<feMergeNode in="SourceGraphic"/>
+</feMerge>
+</filter>
+</defs>
+<rect x="100" y="100" width="824" height="824" rx="185" fill="#FFFCFC" filter="url(#shadow)"/>
+<rect x="100" y="100" width="824" height="824" rx="185" fill="none" stroke="#000000" stroke-opacity="0.05" stroke-width="2"/>
+<g transform="translate(287,287) scale(5.357143)">
+<circle cx="32.5" cy="32.5" r="32.5" fill="#4E75FF"/>
+<circle cx="51.5" cy="51.5" r="32.5" fill="#0A1653"/>
+</g>
+</svg>

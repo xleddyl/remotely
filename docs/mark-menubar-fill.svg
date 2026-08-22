@@ -1,0 +1,5 @@
+<svg width="84" height="84" viewBox="0 0 84 84" xmlns="http://www.w3.org/2000/svg">
+<defs><mask id="knock"><rect width="84" height="84" fill="white"/><circle cx="51.5" cy="51.5" r="32.5" fill="black"/></mask></defs>
+<circle cx="32.5" cy="32.5" r="29" stroke="#000000" stroke-width="7" fill="none" mask="url(#knock)"/>
+<circle cx="51.5" cy="51.5" r="32.5" fill="#000000"/>
+</svg>

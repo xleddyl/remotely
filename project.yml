@@ -21,7 +21,7 @@ settings:
     # Version defaults for local builds. CI overrides both via xcargs:
     # MARKETING_VERSION from the release tag, CURRENT_PROJECT_VERSION from
     # the GitHub Actions run number (monotonic, keeps TestFlight builds unique).
-    MARKETING_VERSION: "0.0.0"
+    MARKETING_VERSION: "1.0.0"
     CURRENT_PROJECT_VERSION: "1"
 targets:
   RemotelyMac:
@@ -85,9 +85,17 @@ targets:
           - UIInterfaceOrientationLandscapeLeft
           - UIInterfaceOrientationLandscapeRight
           - UIInterfaceOrientationPortraitUpsideDown
+        UIAppFonts: ["MontserratAlternates-Bold.ttf"]
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.xleddyl.remotely.ios
         TARGETED_DEVICE_FAMILY: "1,2"
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
         ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME: AccentColor
+    postBuildScripts:
+      - name: Stamp archive build number
+        basedOnDependencyAnalysis: false
+        script: |
+          if [ "$ACTION" = "install" ]; then
+            /usr/libexec/PlistBuddy -c "Set :CFBundleVersion $(date +%y%m%d%H%M)" "$TARGET_BUILD_DIR/$INFOPLIST_PATH"
+          fi

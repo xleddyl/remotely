@@ -144,7 +144,6 @@ private struct StreamingLayout: View {
     @State private var keyboardHeight: CGFloat = 0
     @State private var windowInsets = UIEdgeInsets.zero
 
-    private static let collapseDuration: Double = 0.18
     private static let keyboardWillChange = NotificationCenter.default
         .publisher(for: UIResponder.keyboardWillChangeFrameNotification)
     private static let keyboardWillHide = NotificationCenter.default
@@ -162,7 +161,7 @@ private struct StreamingLayout: View {
                                    collapse: collapse,
                                    openSettings: openSettings,
                                    disconnect: disconnect)
-                        .transition(.move(edge: .bottom))
+                        .transition(.move(edge: .bottom).combined(with: .opacity))
                 }
             }
             .padding(.bottom, keyboardHeight)
@@ -216,7 +215,7 @@ private struct StreamingLayout: View {
     }
 
     private func collapse() {
-        withAnimation(.easeOut(duration: Self.collapseDuration)) { input.expanded = false }
+        withAnimation(ToolbarMotion.expand) { input.expanded = false }
     }
 
     private func setKeyboardHeight(_ height: CGFloat, from note: Notification) {
