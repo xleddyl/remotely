@@ -32,7 +32,7 @@ final class InputInjector {
     // open but their tracking session breaks, leaving zombie menu windows
     // composited on the display (visible in the stream, unclickable).
     private let source = CGEventSource(stateID: .hidSystemState)
-    // Synthetic OpenDisplay tablet — conspicuous in logs; not Wacom (0x056A) or
+    // Synthetic Remotely tablet — conspicuous in logs; not Wacom (0x056A) or
     // typical small driver IDs (1, 2, …).
     private let tabletVendorID: Int64 = 0x0D15       // "ODIS"
     private let tabletProductID: Int64 = 0x0101
@@ -57,9 +57,14 @@ final class InputInjector {
 
     private var penClickSession: PenClickSession?
     private var penLastClick: PenCompletedClick?
+    private var heldButtons: Set<String> = []
+    private var heldKeyCodes: Set<CGKeyCode> = []
+    private let layoutStore: KeyboardLayoutStore
 
-    init(displayID: CGDirectDisplayID) {
+    init(displayID: CGDirectDisplayID, layoutStore: KeyboardLayoutStore = .shared) {
         self.displayID = displayID
+        self.layoutStore = layoutStore
+        layoutStore.startTracking()
     }
 
     static func ensureAccessibilityPermission() -> Bool {
@@ -72,7 +77,7 @@ final class InputInjector {
     }
 
     /// x/y are normalized [0,1] in video space (origin top-left).
-    func handleTouch(phase: String, x: Double, y: Double) {
+    func handleTouch(phase: String, x: Double, y: Double, mods: Int = 0) {
         let bounds = CGDisplayBounds(displayID)   // global CG coords, y-down
         let point = CGPoint(
             x: bounds.origin.x + x * bounds.width,
@@ -110,20 +115,171 @@ final class InputInjector {
         guard let event = CGEvent(mouseEventSource: source, mouseType: type,
                                   mouseCursorPosition: point, mouseButton: .left) else { return }
         event.setIntegerValueField(.mouseEventClickState, value: Int64(clickState))
+        applyFlags(mods, to: event)
         event.post(tap: .cghidEventTap)
     }
 
     /// dx/dy in display pixels, natural-scrolling sign from the phone.
     /// Scroll events take points, so convert via the display's pixel scale.
-    func handleScroll(dx: Double, dy: Double) {
+    func handleScroll(dx: Double, dy: Double, mods: Int = 0) {
         let bounds = CGDisplayBounds(displayID)
         let scale = bounds.width > 0 ? Double(CGDisplayPixelsWide(displayID)) / bounds.width : 2
         guard let event = CGEvent(scrollWheelEvent2Source: source, units: .pixel,
                                   wheelCount: 2,
-                                  wheel1: Int32((dy / scale).rounded()),
-                                  wheel2: Int32((dx / scale).rounded()),
+                                  wheel1: Self.wheelUnits(dy, scale: scale),
+                                  wheel2: Self.wheelUnits(dx, scale: scale),
                                   wheel3: 0) else { return }
+        applyFlags(mods, to: event)
         event.post(tap: .cghidEventTap)
+    }
+
+    private static func wheelUnits(_ delta: Double, scale: Double) -> Int32 {
+        let units = (delta / scale).rounded()
+        guard units.isFinite else { return 0 }
+        return Int32(min(max(units, Double(Int32.min)), Double(Int32.max)))
+    }
+
+    func handleKey(phase: String, key: String, mods: Int = 0) {
+        guard let code = KeyMap.keyCode(for: key) else { return }
+        let isDown: Bool
+        switch phase {
+        case "down": isDown = true
+        case "up": isDown = false
+        default: return
+        }
+        guard let event = CGEvent(keyboardEventSource: source, virtualKey: code,
+                                  keyDown: isDown) else { return }
+        applyFlags(mods, to: event)
+        event.post(tap: .cghidEventTap)
+        if isDown {
+            heldKeyCodes.insert(code)
+        } else {
+            heldKeyCodes.remove(code)
+        }
+    }
+
+    func handleText(_ text: String, mods: Int = 0) {
+        guard !text.isEmpty else { return }
+        let extra = Self.eventFlags(mods)
+        let chord = extra.intersection([.maskCommand, .maskControl, .maskAlternate])
+        let layout = layoutStore.snapshot
+        for character in text {
+            guard let stroke = layout?.stroke(for: character) else {
+                guard chord.isEmpty else { continue }
+                let fallback = KeyboardLayoutMap.unmapped
+                postCharacter(character, code: fallback.code,
+                              flags: fallback.flags.union(extra))
+                continue
+            }
+            postCharacter(character, code: stroke.code, flags: stroke.flags.union(extra))
+        }
+    }
+
+    private func postCharacter(_ character: Character, code: CGKeyCode, flags: CGEventFlags) {
+        let units = Array(String(character).utf16)
+        for keyDown in [true, false] {
+            guard let event = CGEvent(keyboardEventSource: source, virtualKey: code,
+                                      keyDown: keyDown) else { continue }
+            units.withUnsafeBufferPointer { buffer in
+                event.keyboardSetUnicodeString(stringLength: buffer.count,
+                                               unicodeString: buffer.baseAddress)
+            }
+            event.flags = flags
+            event.post(tap: .cghidEventTap)
+        }
+    }
+
+    func handleMouse(button: String, phase: String, x: Double, y: Double, mods: Int = 0) {
+        guard let mouseButton = Self.mouseButton(named: button) else { return }
+        let down: Bool
+        switch phase {
+        case "down": down = true
+        case "up": down = false
+        default: return
+        }
+        let held = mouseButton == .left ? isDown : heldButtons.contains(button)
+        guard down || held else { return }
+        postMouseButton(button: mouseButton, name: button, down: down,
+                        at: screenPoint(nx: x, ny: y), mods: mods)
+    }
+
+    func releaseHeldButtons() {
+        let point = currentCursor()
+        if isDown {
+            postMouseButton(button: .left, name: "left", down: false, at: point, mods: 0)
+        }
+        for name in heldButtons {
+            guard let mouseButton = Self.mouseButton(named: name) else { continue }
+            postMouseButton(button: mouseButton, name: name, down: false, at: point, mods: 0)
+        }
+        heldButtons.removeAll()
+
+        if penDown {
+            postTabletPoint(phase: .up, x: nil, y: nil, pressure: 0,
+                            tiltX: 0, tiltY: 0, rotation: 0)
+            penDown = false
+        }
+        setProximity(entering: false, at: point)
+
+        for code in heldKeyCodes {
+            guard let event = CGEvent(keyboardEventSource: source, virtualKey: code,
+                                      keyDown: false) else { continue }
+            event.post(tap: .cghidEventTap)
+        }
+        heldKeyCodes.removeAll()
+    }
+
+    private static func mouseButton(named name: String) -> CGMouseButton? {
+        switch name {
+        case "left": return .left
+        case "right": return .right
+        case "middle": return .center
+        default: return nil
+        }
+    }
+
+    private func postMouseButton(button: CGMouseButton, name: String, down: Bool,
+                                 at point: CGPoint, mods: Int) {
+        let type: CGEventType
+        switch button {
+        case .left: type = down ? .leftMouseDown : .leftMouseUp
+        case .right: type = down ? .rightMouseDown : .rightMouseUp
+        default: type = down ? .otherMouseDown : .otherMouseUp
+        }
+
+        guard let event = CGEvent(mouseEventSource: source, mouseType: type,
+                                  mouseCursorPosition: point, mouseButton: button) else { return }
+        event.setIntegerValueField(.mouseEventClickState, value: 1)
+        if type == .otherMouseDown || type == .otherMouseUp {
+            event.setIntegerValueField(.mouseEventButtonNumber, value: 2)
+        }
+        applyFlags(mods, to: event)
+        event.post(tap: .cghidEventTap)
+
+        if button == .left { isDown = down }
+        guard button != .left else { return }
+        if down {
+            heldButtons.insert(name)
+        } else {
+            heldButtons.remove(name)
+        }
+    }
+
+    private func applyFlags(_ mods: Int, to event: CGEvent) {
+        guard mods != 0 else { return }
+        event.flags = event.flags.union(Self.eventFlags(mods))
+    }
+
+    private static func eventFlags(_ mods: Int) -> CGEventFlags {
+        let wire = WireModifiers(rawValue: mods)
+        var flags: CGEventFlags = []
+        if wire.contains(.shift) { flags.insert(.maskShift) }
+        if wire.contains(.control) { flags.insert(.maskControl) }
+        if wire.contains(.option) { flags.insert(.maskAlternate) }
+        if wire.contains(.command) { flags.insert(.maskCommand) }
+        if wire.contains(.capsLock) { flags.insert(.maskAlphaShift) }
+        if wire.contains(.function) { flags.insert(.maskSecondaryFn) }
+        return flags
     }
 
     func handleProximity(entering: Bool, x: Double, y: Double) {
@@ -133,8 +289,6 @@ final class InputInjector {
     func handlePencil(phase: String, x: Double, y: Double,
                       pressure: Double, azimuth: Double, altitude: Double,
                       rotation: Double) {
-        // TODO: Wire Apple Pencil Pro barrel roll (UIKit rollAngle) once hardware
-        // is available for testing. rotation on the wire is always 0 for now.
         _ = rotation
         let p = screenPoint(nx: x, ny: y)
         if phase == "down", !inRange {
@@ -220,8 +374,10 @@ final class InputInjector {
         ev.setIntegerValueField(.mouseEventDeltaY, value: 0)
         ev.setIntegerValueField(.mouseEventSubtype, value: Int64(CGEventMouseSubtype.tabletPoint.rawValue))
         ev.setIntegerValueField(.tabletEventDeviceID, value: deviceID)
-        ev.setDoubleValueField(.mouseEventPressure, value: pressure)
-        ev.setIntegerValueField(.tabletEventPointPressure, value: Int64((pressure * 65535.0).rounded()))
+        let unitPressure = pressure.isFinite ? min(max(pressure, 0), 1) : 0
+        ev.setDoubleValueField(.mouseEventPressure, value: unitPressure)
+        ev.setIntegerValueField(.tabletEventPointPressure,
+                                value: Int64((unitPressure * 65535.0).rounded()))
         ev.setDoubleValueField(.tabletEventTiltX, value: tiltX)
         ev.setDoubleValueField(.tabletEventTiltY, value: tiltY)
         ev.setDoubleValueField(.tabletEventRotation, value: rotation)

@@ -14,7 +14,7 @@ import Foundation
 /// the *oldest* bytes and discard everything recent, which is backwards: when a
 /// report comes in, the useful window is what happened just before the problem.
 enum Log {
-    /// `~/Library/Logs/OpenDisplay`. The platform convention, and deliberately
+    /// `~/Library/Logs/Remotely`. The platform convention, and deliberately
     /// not /tmp: macOS clears /tmp on reboot, and rebooting is the first thing
     /// someone tries before filing a bug, so a log there is gone exactly when
     /// it's wanted. Living here also means Console.app lists it under Log
@@ -22,7 +22,7 @@ enum Log {
     private static let directory: URL = {
         let library = FileManager.default.urls(for: .libraryDirectory, in: .userDomainMask).first
             ?? URL(fileURLWithPath: NSHomeDirectory()).appendingPathComponent("Library")
-        return library.appendingPathComponent("Logs/OpenDisplay", isDirectory: true)
+        return library.appendingPathComponent("Logs/Remotely", isDirectory: true)
     }()
 
     /// Sized from the steady-state rate: an active session logs one aggregated
@@ -35,7 +35,7 @@ enum Log {
     private static let queue = DispatchQueue(label: "log")
     private static let writer = RotatingLogFile(
         directory: directory,
-        baseName: "opendisplay",
+        baseName: "remotely",
         maxBytes: maxBytes
     )
     private static let formatter: DateFormatter = {
@@ -248,6 +248,6 @@ final class RotatingLogFile {
     }
 
     private static func reportToStandardError(_ message: String) {
-        try? FileHandle.standardError.write(contentsOf: Data("OpenDisplay log: \(message)\n".utf8))
+        try? FileHandle.standardError.write(contentsOf: Data("Remotely log: \(message)\n".utf8))
     }
 }

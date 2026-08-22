@@ -1,12 +1,12 @@
 // MacSender — captures a display, H.264-encodes it, streams it to the phone.
 //
-// Milestone 1 (mirror):  capture the main display.
-// Milestone 2 (extend):  create a CGVirtualDisplay sized to the phone panel
-//                        (announced by the phone in a "hello" message) and
-//                        capture that — macOS gains a true second monitor.
+// Creates a CGVirtualDisplay sized to the phone panel (announced by the phone
+// in a "hello" message), hands it the global origin so macOS treats it as the
+// primary screen while the Mac's own screens go dark (see
+// MainDisplayTakeover), and captures that display.
 //
 // Pipeline:  ScreenCaptureKit -> VideoToolbox (H.264) -> framed TCP
-// Roles: the PHONE listens, the MAC connects (required for usbmux/USB).
+// Roles: the MAC listens and advertises itself, the DEVICE dials in.
 //
 // Wire protocol, Mac -> phone:   [4-byte big-endian length][Annex B payload]
 //   (keyframes prefixed with SPS+PPS, NALUs delimited by 00 00 00 01)
@@ -19,70 +19,28 @@ import Network
 import CoreMedia
 import AppKit
 
-enum CaptureMode: String {
-    case mirror   // main display (Milestone 1)
-    case extend   // virtual display (Milestone 2)
-}
-
-/// Capture-resolution / bitrate trade-off. The virtual display always runs at
-/// native size — only the captured/encoded stream is scaled, so lower presets
-/// cut encode, transmit, and decode time at the cost of sharpness.
-enum StreamQuality: String, CaseIterable {
-    case best, balanced, fast
-
-    var scale: Double {
-        switch self {
-        case .best: return 1.0
-        case .balanced: return 0.75
-        case .fast: return 0.5
-        }
-    }
-
-    var bitrate: Int {
-        switch self {
-        case .best: return 18_000_000
-        case .balanced: return 10_000_000
-        case .fast: return 6_000_000
-        }
-    }
-
-    var label: String {
-        switch self {
-        case .best: return "Best (native)"
-        case .balanced: return "Balanced (75%)"
-        case .fast: return "Fast (50%)"
-        }
-    }
-
-    var explanation: String {
-        switch self {
-        case .best: return "Pixel-perfect at the device's native resolution. Highest bandwidth and latency."
-        case .balanced: return "75% capture resolution — noticeably lower latency, slight softness."
-        case .fast: return "Half resolution — lowest latency and bandwidth, visibly softer. Good for WiFi."
-        }
-    }
-}
-
 struct PhoneInfo: Decodable {
     let pixelsWide: Int   // landscape-oriented (long edge)
     let pixelsHigh: Int
     let scale: Double
     let device: String?   // "iPad" / "iPhone" (older receivers omit it)
     let id: String?       // per-install identity (older receivers omit it) —
-                          // lets the controller match the same physical device
-                          // across USB and WiFi
+                          // the key the controller routes reconnects on
     let pv: Int?          // receiver protocol version (issue #132); absent on
                           // every pre-handshake install → treat as protocol 1
 
     var kind: String { device ?? "device" }
     var protocolVersion: Int { pv ?? WireProtocol.assumedWhenAbsent }
-}
 
-/// How the sender reaches the receiver. Reconnects re-dial from scratch, so
-/// a USB device that was replugged (new usbmuxd DeviceID) is found again.
-enum SenderTransport {
-    case tcp(NWEndpoint)                   // WiFi (Bonjour) or -host/-port override
-    case usb(udid: String?, port: UInt16)  // native usbmuxd dial; nil = first device
+    static let panelPixelRange = 320...20_000
+    static let panelScaleRange = 1.0...4.0
+
+    var isUsablePanel: Bool {
+        Self.panelPixelRange.contains(pixelsWide)
+            && Self.panelPixelRange.contains(pixelsHigh)
+            && scale.isFinite
+            && Self.panelScaleRange.contains(scale)
+    }
 }
 
 @available(macOS 14.0, *)
@@ -90,54 +48,56 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
 
     // Status surfaced to the UI (updated on main thread).
     @MainActor var onStatus: ((String) -> Void)?
-    @MainActor var onStats: ((Int, Double) -> Void)?   // framesSent, mbps
-    // Fired when a previously connected device stays gone past the grace
-    // period — the controller ends the session (capture, virtual display,
-    // recording indicator all torn down) instead of dialing forever or
-    // silently coming back over a different transport.
+    @MainActor var onStats: ((Double) -> Void)?   // mbps
+    // Fired when a device that dropped stays gone past the reconnect grace:
+    // the controller ends the session (capture, virtual display, recording
+    // indicator all torn down) instead of holding a display nobody watches.
     @MainActor var onDisconnected: (() -> Void)?
-    // Fired when the receiver announces its device locked. The controller
-    // ends this session — an invisible display strands the cursor — and
-    // starts a fresh one that waits for the wake.
-    @MainActor var onPeerSleeping: (() -> Void)?
-    // Fired when the receiver announces the app is quitting: deliberate,
-    // so the controller ends the session without arming a reconnect.
-    @MainActor var onPeerClosed: (() -> Void)?
-    // Fired on every hello — carries the receiver's install id so the
-    // controller can deduplicate USB/WiFi sessions to the same device.
+    // Fired when the receiver said goodbye: the device locked, or the app was
+    // quit. Either way the user is done, so the controller ends the session
+    // right away instead of holding the display for the grace window.
+    @MainActor var onPeerGoodbye: (() -> Void)?
+    // Fired on every hello. It carries the receiver's install id and panel size
+    // so the controller can key the session and show the resolution.
     @MainActor var onHello: ((PhoneInfo) -> Void)?
+    @MainActor var onLinkChanged: ((Bool) -> Void)?
     // Fired when the user stopped the capture from the system UI (menu-bar
     // recording indicator / "Stop Extending"). The controller disconnects
     // the session — teardown plus auto-connect opt-out — so the app honors
     // the stop instead of fighting it.
     @MainActor var onCaptureStoppedByUser: (() -> Void)?
     // Fired when the device's display identity had to be abandoned (macOS
-    // saved hostile state for it — see setupExtend) and a bumped identity
+    // saved hostile state for it — see setupVirtualDisplay) and a bumped identity
     // came online instead: carries the validated TOTAL offset from the
     // device's base identity, for the controller to store as-is. Absolute,
     // not a delta — repeated bumps in one session must not accumulate into
     // an offset nothing ever validated.
     @MainActor var onDisplayIdentityBumped: ((UInt32) -> Void)?
+    @MainActor var onConnected: (() -> Void)?
+    // The virtual display that should own the Mac's global origin, or nil
+    // once this session no longer has one. The controller stores it on the
+    // session and recomputes the takeover from the whole session list — this
+    // is a state report, not a command.
+    @MainActor var onMainDisplayChanged: ((CGDirectDisplayID?) -> Void)?
+    @MainActor var onPrefs: ((StreamPrefs) -> Void)?
 
     private var stream: SCStream?
     private var encoder: VTCompressionSession?
+    private var audioStreamer: AudioStreamer?
+    private var audioRequested = false
     private var connection: NWConnection?
     private var virtualDisplay: VirtualDisplay?
     private let queue = DispatchQueue(label: "sender.video")
     private let startCode: [UInt8] = [0, 0, 0, 1]
 
-    // The dial target. Written on `queue` only (after init): the controller
-    // can migrate a live session between transports via switchTransport.
-    private var transport: SenderTransport
     private let endpointName: String
-    private let mode: CaptureMode
     private let quality: StreamQuality
     // Stable per-device serial for the virtual display, so macOS can tell
-    // multiple OpenDisplay monitors apart and persist their arrangement.
+    // multiple Remotely monitors apart and persist their arrangement.
     private let displaySerial: UInt32
     // How far this device's identity has already moved off its base serial
     // and productID (identities macOS saved hostile state for are abandoned
-    // permanently — see setupExtend). Advanced in-session when a fallback
+    // permanently — see setupVirtualDisplay). Advanced in-session when a fallback
     // identity is validated, so a rotation rebuild doesn't re-probe the
     // poisoned one.
     private var baseIdentityOffset: UInt32
@@ -178,33 +138,45 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
     private var dropsNetTotal = 0
     private var needsKeyframe = true
     private var connectionReady = false
-    private var stopped = false
+    private var stoppedFlag = false
+    private var stopped: Bool {
+        get {
+            pipelineLock.lock()
+            defer { pipelineLock.unlock() }
+            return stoppedFlag
+        }
+        set {
+            pipelineLock.lock()
+            stoppedFlag = newValue
+            pipelineLock.unlock()
+        }
+    }
     // The liveness monitors are self-rescheduling chains guarded only by
     // `stopped`; arm them at most once per instance so a double start() can't
     // stack parallel loops (the failure mode behind #75). Mirrors the
     // `monitorsStarted` guard the iOS PhoneReceiver already uses.
     private var monitorsStarted = false
 
-    // Disconnect detection: before the first connection we dial patiently
-    // (the user may start the Mac side first); once connected, a device that
-    // stays gone past the grace ends the session via onDisconnected.
-    private var everConnected = false
+    // A dead link ends the session immediately: dropConnection reports the
+    // device gone, the virtual display comes down and the windows migrate
+    // back to the Mac's screens. A returning device builds a fresh session.
+    // This timer only covers sessions born without a connection (restartAll
+    // rebuilds): if the device does not redial within this window the
+    // watchdog ends them, so they cannot hang around forever.
     private var disconnectedSince: Date?
-    private let disconnectGraceSeconds: TimeInterval = 10
+    private let reconnectGraceSeconds: TimeInterval = 5
 
-    private var lastHello: PhoneInfo?
-    private var helloContinuation: CheckedContinuation<PhoneInfo, Error>?
+    private let idleCaptureStopSeconds: TimeInterval = 15
+    private var captureSuspended = false
+    private var lastCaptureTarget: (id: CGDirectDisplayID, width: Int, height: Int)?
+
+    private var lastHello: PhoneInfo
     private var inputInjector: InputInjector?
 
     // Liveness: both sides ping every 2s; if nothing arrives for 5s the link
-    // is half-open (e.g. usbmuxd accepted but the device is gone) — reconnect.
+    // is half-open (the device's app was suspended, the network dropped), so
+    // let it go and wait for the device to dial back.
     private var lastReceived = Date()
-
-    // Session created after the receiver went to sleep: it refuses
-    // connections until its screen is back, so dial failures mean "asleep",
-    // not "app closed" — surface that instead of the usual hints. Cleared by
-    // the first successful connection.
-    private var awaitingWake: Bool
 
     // A capture that keeps dying is not coming back on its own (capture
     // authorization revoked, or saved display state blocks the identity) —
@@ -215,21 +187,13 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
     private var captureRecoveryFailures = 0
     private let maxCaptureRecoveryFailures = 5
 
-    // Consecutive actively-refused dials on a previously connected session.
-    // Refusal is unambiguous: the device is reachable but nothing listens,
-    // so the app was quit (a suspended app's kernel still accepts, and a
-    // network blip times out instead of refusing). Three in a row (~3s)
-    // ends the session early; the full 10s grace stays reserved for the
-    // ambiguous failure kinds.
-    private var consecutiveRefusals = 0
-    private let refusalsBeforeGivingUp = 3
     private var dropsTotal: Int { dropsEncTotal + dropsNetTotal }
 
     // Local cursor echo: a cursor baked into the video carries the full
     // capture→encode→stream→display latency (~30ms perceived). Instead we
     // hide it from capture and stream its position on the control channel —
     // the phone draws it locally on the ~2ms path the touches use.
-    // Escape hatch: `defaults write sh.peet.opensidecar.mac localCursor -bool false`.
+    // Escape hatch: `defaults write com.xleddyl.remotely.mac localCursor -bool false`.
     private let localCursor = UserDefaults.standard.object(forKey: "localCursor") == nil
         || UserDefaults.standard.bool(forKey: "localCursor")
     private var cursorTimer: DispatchSourceTimer?
@@ -268,12 +232,17 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
     // watchdog redials, so it needs the same treatment. Detail is the byte
     // count of the last message that would not parse.
     private var unparseableControlLogPolicy = ThrottledLogPolicy<Int>()
+    private var textInjectionLogPolicy = ThrottledLogPolicy<Bool>(interval: 2)
+    private let maxInjectedTextLength = 512
+    private var lastMovedNorm: (x: Double, y: Double)?
+    private var lastMovedDelta: (x: Double, y: Double)?
+    private var dragReversals = 0
+    private var dragSamples = 0
     // Capture cadence: SCK only emits on content change, so the phone can't
     // tell "Mac rendered 45fps" from "frames got lost" — count deliveries here.
     private var capFrames = 0
     private var capWindowStart = Date()
 
-    private var framesSent = 0
     private var bytesSent = 0
     private var statsWindowStart = Date()
 
@@ -286,16 +255,16 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
     /// At most one timer is active; each new drop resets the 30ms deadline.
     private var dropReplayTimer: DispatchSourceTimer?
 
-    init(transport: SenderTransport, name: String, mode: CaptureMode,
-         quality: StreamQuality = .best, displaySerial: UInt32 = 0x0001,
-         identityOffset: UInt32 = 0, awaitingWake: Bool = false) {
-        self.transport = transport
+    init(hello: PhoneInfo, name: String,
+         quality: StreamQuality = .best,
+         displaySerial: UInt32 = 0x0001,
+         identityOffset: UInt32 = 0) {
+        self.lastHello = hello
         self.endpointName = name
-        self.mode = mode
         self.quality = quality
         self.displaySerial = displaySerial
         self.baseIdentityOffset = identityOffset
-        self.awaitingWake = awaitingWake
+        self.disconnectedSince = Date()
         super.init()
     }
 
@@ -303,7 +272,6 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
 
     func start() async throws {
         stopped = false
-        queue.async { self.connect() }   // dial state lives on `queue`
         if !monitorsStarted {
             monitorsStarted = true
             schedulePing()
@@ -323,77 +291,45 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
             Log.info("Screen Recording permission granted")
         }
 
-        switch mode {
-        case .mirror:
-            let content = try await SCShareableContent.current
-            guard let display = content.displays.first else {
-                throw NSError(domain: "MacSender", code: 1,
-                              userInfo: [NSLocalizedDescriptionKey: "no displays found"])
-            }
-            // SCDisplay reports points; capture at point resolution for M1.
-            let captureW = (Int(Double(display.width) * quality.scale)) & ~1
-            let captureH = (Int(Double(display.height) * quality.scale)) & ~1
-            try await startCapture(display: display, pixelsWide: captureW, pixelsHigh: captureH)
+        try await setupVirtualDisplay(lastHello)
 
-        case .extend:
-            // awaitingWake is queue-confined — read it there before surfacing.
-            queue.async { [weak self] in
-                guard let self else { return }
-                let text = self.awaitingWake
-                    ? "\(self.endpointName) is asleep — reconnects when it wakes…"
-                    : "Waiting for the device to connect…"
-                Task { await self.status(text) }
+        // Touch back-channel (Milestone 3). Needs Accessibility trust;
+        // streaming works without it, so don't interrupt with a prompt —
+        // the permission panel's Grant button asks when the user is ready.
+        if !AXIsProcessTrusted() {
+            await status("Main display — grant Accessibility for touch input")
+            // Event posting is trust-checked per-post, so it starts working
+            // the moment the user grants — poll just to log/report it.
+            while !AXIsProcessTrusted() {
+                try await Task.sleep(for: .seconds(2))
+                if stopped { return }
             }
-            let info = try await waitForHello()
-            try await setupExtend(info)
-
-            // Touch back-channel (Milestone 3). Needs Accessibility trust;
-            // streaming works without it, so don't interrupt with a prompt —
-            // the permission panel's Grant button asks when the user is ready.
-            if !AXIsProcessTrusted() {
-                await status("Extending — grant Accessibility for touch input")
-                // Event posting is trust-checked per-post, so it starts working
-                // the moment the user grants — poll just to log/report it.
-                while !AXIsProcessTrusted() {
-                    try await Task.sleep(for: .seconds(2))
-                    if stopped { return }
-                }
-                Log.info("Accessibility permission granted — touch input live")
-            }
+            Log.info("Accessibility permission granted — touch input live")
         }
     }
+
+    /// Phone panel is @3x; the virtual display runs @2x HiDPI, so points
+    /// = native pixels / 2 (rounded down to even for the encoder).
+    private static func points(fromPixels pixels: Int) -> Int { (pixels / 2) & ~1 }
 
     /// Build (or rebuild) the virtual display + capture for the announced
     /// phone dimensions. Called at startup and again whenever the phone
     /// rotates (it re-sends hello with swapped dimensions).
-    private func setupExtend(_ info: PhoneInfo) async throws {
+    private func setupVirtualDisplay(_ info: PhoneInfo) async throws {
         Log.info("phone hello: \(info.pixelsWide)x\(info.pixelsHigh) @\(info.scale)x")
 
-        // Phone panel is @3x; the virtual display runs @2x HiDPI, so points
-        // = native pixels / 2 (rounded down to even for the encoder).
-        let pointsWide = (info.pixelsWide / 2) & ~1
-        let pointsHigh = (info.pixelsHigh / 2) & ~1
+        let pointsWide = Self.points(fromPixels: info.pixelsWide)
+        let pointsHigh = Self.points(fromPixels: info.pixelsHigh)
         // Rough physical size so macOS picks a sane default UI scale.
         let mm = info.pixelsWide >= info.pixelsHigh
             ? CGSize(width: 147, height: 68)
             : CGSize(width: 68, height: 147)
 
-        // USB sessions can start before lockdown resolves the device name —
-        // fall back to the kind from the hello rather than the generic label.
-        let displayName = endpointName.hasPrefix("iPhone / iPad")
-            ? "OpenDisplay — \(info.kind)"
-            : "OpenDisplay — \(endpointName)"
+        let displayName = "Remotely — \(endpointName)"
         // Keep one stable identity across rotations. Reconfiguration below
         // applies a new mode to the existing virtual monitor, so macOS keeps
         // its windows and arrangement attached to this physical device.
         let serial = displaySerial
-        // Arrangement memory (#116): keyed on the device's install id so the
-        // display returns to its spot across transports and orientations —
-        // the serial-keyed memory macOS keeps starts from scratch whenever
-        // the serial changes. Old receivers without an id fall back to the
-        // session serial, which is at least orientation-stable.
-        let arrangementKey = info.id ?? String(format: "serial-%08x", displaySerial)
-        let sizeInPoints = CGSize(width: pointsWide, height: pointsHigh)
         // Creating a display whose serial is still registered fails — e.g. a
         // just-quit instance's display lingers in WindowServer for a moment
         // after the process dies. Retry through that window instead of
@@ -432,7 +368,9 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
                 // `if stopped` checks in the permission-poll loops above.)
                 if stopped { return }
                 created = await MainActor.run {
-                    let restoreOrigin = DisplayArrangement.origin(for: sizeInPoints, device: arrangementKey)
+                    // The takeover owns the origin itself (MainDisplayTakeover
+                    // puts the display at (0,0)), so there is no per-device
+                    // arrangement memory to restore or record here.
                     // The productID moves with the serial: field data in #206
                     // suggests some macOS versions key the hostile state on
                     // the product, not the serial — bumping both escapes
@@ -441,12 +379,7 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
                                           pointsWide: pointsWide, pointsHigh: pointsHigh,
                                           sizeInMillimeters: mm,
                                           serialNum: serial &+ totalOffset,
-                                          productID: 0x4F53 &+ totalOffset,
-                                          restoreOrigin: restoreOrigin,
-                                          onOriginChange: { origin, currentSize in
-                                              DisplayArrangement.save(origin: origin, size: currentSize,
-                                                                      device: arrangementKey)
-                                          })
+                                          productID: 0x4F53 &+ totalOffset)
                 }
                 if created != nil { break }
                 Log.info("virtual display creation failed (identity +\(totalOffset), attempt \(attempt + 1)) — retrying")
@@ -480,18 +413,22 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
             if sawPoisonedIdentity {
                 throw NSError(domain: "MacSender", code: 5, userInfo: [
                     NSLocalizedDescriptionKey: "saved display state in macOS is blocking "
-                        + "OpenDisplay's displays — log out and back in (or restart the Mac), then reconnect"])
+                        + "Remotely's displays — log out and back in (or restart the Mac), then reconnect"])
             }
             throw identityError
         }
+        inputInjector?.releaseHeldButtons()
         inputInjector = InputInjector(displayID: vd.displayID)
         // Quality scaling: capture/encode below native when requested — the
         // display itself stays native so window layout is unaffected.
         let captureW = (Int(Double(pointsWide * 2) * quality.scale)) & ~1
         let captureH = (Int(Double(pointsHigh * 2) * quality.scale)) & ~1
         try await startCapture(display: display, pixelsWide: captureW, pixelsHigh: captureH)
+        // Only once the stream is actually up: a session that never captures
+        // must not darken the Mac's screens on its way to failing.
+        reportMainDisplay(vd.displayID)
 
-        // Debug aid (`defaults write sh.peet.opensidecar.mac testPattern -bool true`):
+        // Debug aid (`defaults write com.xleddyl.remotely.mac testPattern -bool true`):
         // an animated window on the virtual display generates a constant frame
         // stream so steady-state latency can be measured without user activity.
         if UserDefaults.standard.bool(forKey: "testPattern") {
@@ -515,10 +452,14 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
             // display, but never for a rotation: it belongs to the retired
             // desktop and can otherwise be replayed onto the new one.
             invalidateCapturePipeline(discardingLastFrame: true)
-            if let stream { try? await stream.stopCapture() }
-            stream = nil
-            if let encoder { VTCompressionSessionInvalidate(encoder) }
-            encoder = nil
+            let live = stream
+            if let live { try? await live.stopCapture() }
+            await onQueue {
+                if self.stream === live { self.stream = nil }
+                self.teardownAudio()
+                if let encoder = self.encoder { VTCompressionSessionInvalidate(encoder) }
+                self.encoder = nil
+            }
             needsKeyframe = true
             do {
                 if try await resizeExistingDisplay(for: target) {
@@ -528,15 +469,16 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
                     // Safety fallback for a system that refuses an in-place
                     // mode switch. This keeps the old recovery behaviour.
                     virtualDisplay = nil
-                    try await setupExtend(target)
+                    try await setupVirtualDisplay(target)
                 }
             } catch {
                 Log.info("reconfigure failed: \(error)")
                 await status("Rotation failed: \(error.localizedDescription)")
+                queue.async { self.scheduleCaptureRecovery() }
                 return
             }
-            if let latest = lastHello,
-               latest.pixelsWide != target.pixelsWide || latest.pixelsHigh != target.pixelsHigh {
+            let latest = lastHello
+            if latest.pixelsWide != target.pixelsWide || latest.pixelsHigh != target.pixelsHigh {
                 target = latest   // rotated again while we were rebuilding
                 continue
             }
@@ -551,13 +493,11 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
     private func resizeExistingDisplay(for info: PhoneInfo) async throws -> Bool {
         guard let vd = virtualDisplay else { return false }
 
-        let pointsWide = (info.pixelsWide / 2) & ~1
-        let pointsHigh = (info.pixelsHigh / 2) & ~1
-        let arrangementKey = info.id ?? String(format: "serial-%08x", displaySerial)
+        let pointsWide = Self.points(fromPixels: info.pixelsWide)
+        let pointsHigh = Self.points(fromPixels: info.pixelsHigh)
         let size = CGSize(width: pointsWide, height: pointsHigh)
         let didResize = await MainActor.run {
-            vd.resize(pointsWide: pointsWide, pointsHigh: pointsHigh,
-                      movingTo: DisplayArrangement.origin(for: size, device: arrangementKey))
+            vd.resize(pointsWide: pointsWide, pointsHigh: pointsHigh)
         }
         guard didResize else { return false }
 
@@ -565,13 +505,21 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         let captureW = (Int(Double(pointsWide * 2) * quality.scale)) & ~1
         let captureH = (Int(Double(pointsHigh * 2) * quality.scale)) & ~1
         try await startCapture(display: display, pixelsWide: captureW, pixelsHigh: captureH)
+        inputInjector?.releaseHeldButtons()
         inputInjector = InputInjector(displayID: vd.displayID)
+        reportMainDisplay(vd.displayID)
 
         if UserDefaults.standard.bool(forKey: "testPattern") {
             let id = vd.displayID
             Task { @MainActor in TestPattern.show(on: id) }
         }
         return true
+    }
+
+    /// Tell the controller which display this session wants at the Mac's
+    /// global origin (nil = none any more).
+    private func reportMainDisplay(_ displayID: CGDirectDisplayID?) {
+        Task { @MainActor in self.onMainDisplayChanged?(displayID) }
     }
 
     /// The virtual display takes a moment to show up in shareable content.
@@ -622,21 +570,68 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         // the encoder for ~13ms — headroom prevents SCK starvation drops.
         config.queueDepth = 8
         config.showsCursor = !localCursor
+        let peerVersion = lastHello.protocolVersion
+        let audioAllowed = peerVersion >= WireProtocol.audioWireVersion
+        if audioAllowed {
+            config.capturesAudio = true
+            config.sampleRate = AudioStreamer.sampleRate
+            config.channelCount = AudioStreamer.channelCount
+            config.excludesCurrentProcessAudio = true
+            Log.info("audio capture requested: \(AudioStreamer.sampleRate)Hz "
+                + "\(AudioStreamer.channelCount)ch, peer pv=\(peerVersion), "
+                + "device asked for audio=\(audioRequested)")
+        } else {
+            Log.info("audio capture off: peer pv=\(peerVersion) is below "
+                + "\(WireProtocol.audioWireVersion)")
+        }
 
         invalidateCapturePipeline(discardingLastFrame: true)
+        await onQueue { self.teardownAudio() }
         let generation = captureGenerationNow
         try setupEncoder(width: pixelsWide, height: pixelsHigh)
 
         let stream = SCStream(filter: filter, configuration: config, delegate: self)
         try stream.addStreamOutput(self, type: .screen, sampleHandlerQueue: queue)
+        var audio: AudioStreamer?
+        if audioAllowed {
+            let streamer = makeAudioStreamer()
+            do {
+                try stream.addStreamOutput(streamer, type: .audio,
+                                           sampleHandlerQueue: streamer.queue)
+                audio = streamer
+                Log.info("audio stream output added")
+            } catch {
+                Log.info("audio output could not be attached (\(error)), streaming video only")
+            }
+        }
         self.stream = stream
         do {
             try await stream.startCapture()
         } catch {
             if self.stream === stream { self.stream = nil }
+            audio?.stop()
             throw error
         }
+        guard !stopped else {
+            stream.stopCapture { _ in }
+            if self.stream === stream { self.stream = nil }
+            audio?.stop()
+            await onQueue {
+                if let encoder = self.encoder { VTCompressionSessionInvalidate(encoder) }
+                self.encoder = nil
+            }
+            return
+        }
+        await onQueue {
+            self.audioStreamer = audio
+            audio?.setEnabled(self.audioRequested)
+            if audio != nil {
+                Log.info("audio streamer attached to the new capture, enabled=\(self.audioRequested)")
+            }
+        }
         captureDisplayID = display.displayID
+        lastCaptureTarget = (display.displayID, pixelsWide, pixelsHigh)
+        captureSuspended = false
         lastCursorPNGHash = 0      // rotation rebuilds: re-send the sprite
         lastCursorSent = (-1, -1, false)
         startCursorEcho()
@@ -646,59 +641,64 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         // without ever resetting the counter, and the next unrelated death
         // starts with as little as one round left.
         queue.async { self.captureRecoveryFailures = 0 }
-        Log.info("capture started: \(pixelsWide)x\(pixelsHigh) display \(display.displayID) generation \(generation) mode \(mode.rawValue) localCursor=\(localCursor)")
-        let kind = lastHello?.kind ?? "device"
-        await status("\(mode == .extend ? "Extending to" : "Mirroring to") \(kind) (\(pixelsWide)×\(pixelsHigh))")
+        Log.info("capture started: \(pixelsWide)x\(pixelsHigh) display \(display.displayID) generation \(generation) localCursor=\(localCursor)")
+        await status("Main display on \(lastHello.kind) (\(pixelsWide)×\(pixelsHigh))")
     }
 
     func stop() {
         stopped = true
-        invalidateCapturePipeline(discardingLastFrame: true)
-        cursorTimer?.cancel()
-        cursorTimer = nil
-        cursorImageTimer?.cancel()
-        cursorImageTimer = nil
-        stream?.stopCapture { _ in }
-        stream = nil
-        connection?.cancel()
-        connection = nil
-        if let encoder { VTCompressionSessionInvalidate(encoder) }
-        encoder = nil
         virtualDisplay = nil   // releasing it removes the display
-        cancelDropReplayTimer()
-        queue.async { [weak self] in
-            // Unblock a start() that is still waiting for the hello.
-            self?.helloContinuation?.resume(throwing: CancellationError())
-            self?.helloContinuation = nil
+        // Belt and braces: the controller already recomputes the takeover from
+        // its session list, but a stopped sender never owns the origin again.
+        reportMainDisplay(nil)
+        queue.async {
+            self.inputInjector?.releaseHeldButtons()
+            self.invalidateCapturePipeline(discardingLastFrame: true)
+            self.cursorTimer?.cancel()
+            self.cursorTimer = nil
+            self.cursorImageTimer?.cancel()
+            self.cursorImageTimer = nil
+            self.teardownAudio()
+            self.stream?.stopCapture { _ in }
+            self.stream = nil
+            self.connection?.cancel()
+            self.connection = nil
+            if let encoder = self.encoder { VTCompressionSessionInvalidate(encoder) }
+            self.encoder = nil
+            self.cancelDropReplayTimer()
         }
     }
 
-    /// Migrate the live session to another transport: swap the socket under
-    /// the pipeline — virtual display, capture and encoder stay up (no
-    /// display destroy/create, so no screen flash and no window reshuffle)
-    /// while the connection redials over the new transport. The receiver
-    /// treats it like any reconnect: the fresh connection replaces the old
-    /// one and the video resyncs with a keyframe. Which transport to be on
-    /// is the controller's call (cable-in upgrade, unplug failover).
-    func switchTransport(to newTransport: SenderTransport) {
-        queue.async { [weak self] in
-            guard let self, !self.stopped else { return }
-            let label = if case .usb = newTransport { "USB" } else { "WiFi" }
-            Log.info("switching \(self.endpointName) to \(label)")
-            self.transport = newTransport
-            // Fresh grace window: if the new link can't come up either, the
-            // session ends like any other disconnect instead of dialing
-            // a dead transport forever.
-            self.disconnectedSince = Date()
-            self.connectionReady = false
-            self.dialGeneration += 1   // a dial still in flight must not adopt
-            self.connection?.cancel()
-            self.connection = nil
-            self.pendingSends = 0
-            self.pipelineLock.lock()
-            self.pendingEncodes = 0
-            self.pipelineLock.unlock()
-            self.connect()
+    // MARK: - System audio
+
+    private func makeAudioStreamer() -> AudioStreamer {
+        let streamer = AudioStreamer()
+        streamer.send = { [weak self] json in
+            guard let self else { return }
+            self.queue.async { self.sendJSONFrame(json) }
+        }
+        return streamer
+    }
+
+    private func teardownAudio() {
+        audioStreamer?.stop()
+        audioStreamer = nil
+    }
+
+    private func setAudioRequested(_ value: Bool) {
+        guard audioRequested != value else { return }
+        audioRequested = value
+        Log.info("device audio \(value ? "on" : "off") (peer pv=\(lastHello.protocolVersion), "
+            + "capture \(audioStreamer == nil ? "not carrying audio yet" : "live"))")
+        audioStreamer?.setEnabled(value)
+    }
+
+    private func onQueue(_ body: @escaping () -> Void) async {
+        await withCheckedContinuation { continuation in
+            queue.async {
+                body()
+                continuation.resume()
+            }
         }
     }
 
@@ -711,44 +711,9 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
     private func reportGone(_ reason: String) {
         guard !goneReported, !stopped else { return }
         goneReported = true
+        inputInjector?.releaseHeldButtons()
         Log.info(reason)
         Task { @MainActor in self.onDisconnected?() }
-    }
-
-    /// A dial was actively refused (must be called on `queue`). On a session
-    /// that has streamed before, enough refusals in a row prove the receiver
-    /// app is gone — end now instead of waiting out the grace.
-    private func dialRefused() {
-        guard everConnected, !stopped else { return }
-        consecutiveRefusals += 1
-        if consecutiveRefusals >= refusalsBeforeGivingUp {
-            reportGone("dial refused \(consecutiveRefusals)x — receiver app is gone, ending session")
-        }
-    }
-
-    /// The receiver's Bonjour advertisement disappeared (the system
-    /// deregisters a dead app's service within ~1s, while a suspended app
-    /// keeps it). Only meaningful once the connection is already down —
-    /// a live connection outranks a flapping mDNS cache. Together they
-    /// prove a WiFi receiver quit, where dials just stall instead of
-    /// being refused.
-    func peerServiceWithdrawn() {
-        queue.async { [weak self] in
-            guard let self, !self.stopped, self.everConnected,
-                  !self.connectionReady else { return }
-            self.reportGone("service withdrawn and connection down — receiver app is gone, ending session")
-        }
-    }
-
-    /// Drop the current connection and dial again — fresh TCP through the
-    /// tunnel, fresh accept on the phone. Bound to the UI Reconnect button.
-    func forceReconnect() {
-        queue.async { [weak self] in
-            guard let self, !self.stopped else { return }
-            Log.info("manual reconnect requested")
-            self.disconnectedSince = Date()   // fresh grace window
-            self.scheduleReconnect()
-        }
     }
 
     func stream(_ stream: SCStream, didStopWithError error: Error) {
@@ -770,10 +735,13 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         Task { await status("Capture stopped: \(error.localizedDescription)") }
         // E.g. display sleep can tear the virtual display down underneath the
         // stream — rebuild instead of sitting dead until an app restart.
-        guard !stopped, mode == .extend else { return }
+        guard !stopped else { return }
         invalidateCapturePipeline()
-        self.stream = nil
-        scheduleCaptureRecovery()
+        queue.async {
+            if self.stream === stream { self.stream = nil }
+            self.teardownAudio()
+            self.scheduleCaptureRecovery()
+        }
     }
 
     /// Retry until capture is back. Per issue #29 fix-plan point 1: a dead
@@ -784,8 +752,8 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
     /// is actually gone (e.g. display sleep tore it down).
     private func scheduleCaptureRecovery() {
         queue.asyncAfter(deadline: .now() + 3.0) { [weak self] in
-            guard let self, !self.stopped, self.stream == nil,
-                  let hello = self.lastHello else { return }
+            guard let self, !self.stopped, self.stream == nil else { return }
+            let hello = self.lastHello
             // Does our virtual display still exist? CGDisplayBounds returns a
             // zero rect for an unknown id, so a non-empty bounds means it's live.
             // Test isEmpty, not isNull: isNull is only true for the special
@@ -793,12 +761,22 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
             // rebuild fallback below would become unreachable.
             if let vd = self.virtualDisplay,
                !CGDisplayBounds(vd.displayID).isEmpty {
+                guard Self.points(fromPixels: hello.pixelsWide) == vd.pointsWide,
+                      Self.points(fromPixels: hello.pixelsHigh) == vd.pointsHigh else {
+                    Log.info("capture died at stale geometry, rebuilding for "
+                        + "\(hello.pixelsWide)x\(hello.pixelsHigh)")
+                    Task {
+                        await self.reconfigure(hello)
+                        self.queue.async { self.recoveryRoundEnded() }
+                    }
+                    return
+                }
                 Log.info("capture died — display still present, re-attaching capture only (#29)")
                 Task {
                     do {
                         let display = try await self.findSCDisplay(id: vd.displayID)
                         // Capture at the display's pixel resolution (points ×2 @2x),
-                        // not SCDisplay.width (logical points) — matches setupExtend.
+                        // not SCDisplay.width (logical points) — matches setupVirtualDisplay.
                         let captureW = (Int(Double(vd.pointsWide * 2) * self.quality.scale)) & ~1
                         let captureH = (Int(Double(vd.pointsHigh * 2) * self.quality.scale)) & ~1
                         try await self.startCapture(display: display,
@@ -821,6 +799,39 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         }
     }
 
+    private func suspendCapture() {
+        guard !stopped, let live = stream else { return }
+        captureSuspended = true
+        invalidateCapturePipeline()
+        teardownAudio()
+        cursorTimer?.cancel()
+        cursorTimer = nil
+        cursorImageTimer?.cancel()
+        cursorImageTimer = nil
+        stream = nil
+        live.stopCapture { _ in }
+        Log.info("no device for \(Int(idleCaptureStopSeconds))s, capture stopped, display kept")
+        Task { await status("Disconnected, waiting for the device to come back") }
+    }
+
+    private func resumeCapture() {
+        guard !stopped, stream == nil, let target = lastCaptureTarget else {
+            captureSuspended = false
+            return
+        }
+        Task {
+            do {
+                let display = try await self.findSCDisplay(id: target.id)
+                try await self.startCapture(display: display,
+                                            pixelsWide: target.width, pixelsHigh: target.height)
+                self.needsKeyframe = true
+            } catch {
+                Log.info("capture resume failed (\(error)), handing over to recovery")
+                self.queue.async { self.scheduleCaptureRecovery() }
+            }
+        }
+    }
+
     /// SCK can report `.userStopped` for stops the user did not initiate
     /// when the console goes non-interactive (screen lock, fast user
     /// switch). Only a stop from an interactive console can be a deliberate
@@ -828,10 +839,7 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
     /// which was already how those transitions healed before this check
     /// existed.
     private var consoleIsInteractive: Bool {
-        guard let info = CGSessionCopyCurrentDictionary() as? [String: Any] else { return true }
-        let onConsole = info[kCGSessionOnConsoleKey as String] as? Bool ?? true
-        let locked = info["CGSSessionScreenIsLocked"] as? Bool ?? false
-        return onConsole && !locked
+        ScreenSessionState.isConsoleInteractive
     }
 
     /// On `queue`: after a recovery round, re-arm the loop while capture is
@@ -853,27 +861,44 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         scheduleCaptureRecovery()
     }
 
-    // MARK: - Connection (with retry)
+    // MARK: - Connection (accepted, never dialed)
 
-    // Guards against a stale async USB dial adopting after a newer one (or a
-    // manual reconnect) superseded it. Only touched on `queue`.
-    private var dialGeneration = 0
-
-    private func connect() {
-        guard !stopped else { return }
-        switch transport {
-        case .tcp(let endpoint): connectTCP(endpoint)
-        case .usb(let udid, let port): connectUSB(udid: udid, port: port)
+    func adopt(_ conn: NWConnection, hello: PhoneInfo) {
+        queue.async { [weak self] in
+            guard let self, !self.stopped else {
+                conn.cancel()
+                return
+            }
+            if let existing = self.connection, existing !== conn {
+                Log.info("replacing the connection to \(self.endpointName)")
+                existing.cancel()
+            }
+            self.connection = conn
+            self.resetPipelineCounters()
+            conn.stateUpdateHandler = { [weak self] state in
+                guard let self else { return }
+                self.queue.async {
+                    guard self.connection === conn, !self.stopped else { return }
+                    switch state {
+                    case .failed(let error):
+                        self.dropConnection("connection failed: \(error)")
+                    case .cancelled:
+                        self.connectionReady = false
+                        self.reportLink(false)
+                    default:
+                        break
+                    }
+                }
+            }
+            self.becomeReady(conn)
+            self.applyHello(hello)
         }
     }
 
-    /// Bookkeeping shared by both transports once a connection is live.
+    /// Bookkeeping once a connection is live.
     private func becomeReady(_ conn: NWConnection) {
         Log.info("connection ready to \(endpointName)")
         connectionReady = true
-        everConnected = true
-        awaitingWake = false
-        consecutiveRefusals = 0
         disconnectedSince = nil
         needsKeyframe = true   // new peer needs SPS/PPS + IDR
         // Keep cached pixels: ScreenCaptureKit stays quiet on a static
@@ -886,150 +911,35 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         // the fresh peer — the cursor analogue of forcing a keyframe.
         lastCursorPNGHash = 0
         lastCursorSent = (-1, -1, false)
+        audioStreamer?.announceAgain()
         lastReceived = Date()  // fresh grace period for the watchdog
         receiveControl(on: conn)
+        reportLink(true)
+        Task { @MainActor in self.onConnected?() }
         Task { await self.status("Connected to \(self.endpointName)") }
     }
 
-    private func connectTCP(_ endpoint: NWEndpoint) {
-        let options = NWProtocolTCP.Options()
-        options.noDelay = true   // latency matters more than throughput here
-        let params = NWParameters(tls: nil, tcp: options)
-        let conn = NWConnection(to: endpoint, using: params)
-        connection = conn
-        // A dial to a withdrawn Bonjour service (receiver asleep or app
-        // closed) sits in .preparing forever — it neither fails nor resolves
-        // when the service later returns, observed on macOS 26. Give every
-        // dial a deadline and redial fresh: a new NWConnection re-runs
-        // Bonjour resolution, so the retry loop reaches the receiver the
-        // moment it advertises again.
-        let generation = dialGeneration
-        queue.asyncAfter(deadline: .now() + 5.0) { [weak self] in
-            guard let self, generation == self.dialGeneration, !self.stopped,
-                  self.connection === conn, conn.state != .ready else { return }
-            Log.info("dial timed out in \(conn.state) — redialing")
-            self.scheduleReconnect()
-        }
-        conn.stateUpdateHandler = { [weak self] state in
-            guard let self else { return }
-            switch state {
-            case .ready:
-                self.becomeReady(conn)
-            case .failed(let error):
-                Log.info("connection failed: \(error)")
-                self.connectionReady = false
-                if case .posix(let code) = error, code == .ECONNREFUSED {
-                    self.dialRefused()
-                }
-                self.scheduleReconnect()
-            case .waiting(let error):
-                // On loopback there is no "path change" to wake us up again
-                // (e.g. a manual -host tunnel not started yet) — treat
-                // waiting as failure and poll by reconnecting.
-                Log.info("connection waiting: \(error) — will retry")
-                self.connectionReady = false
-                // Read the queue-confined flag here (handler runs on queue),
-                // not inside the detached status Task.
-                let text = self.awaitingWake
-                    ? "\(self.endpointName) is asleep — reconnects when it wakes…"
-                    : "Waiting for receiver at \(self.endpointName)…"
-                Task { await self.status(text) }
-                self.scheduleReconnect()
-            case .cancelled:
-                self.connectionReady = false
-            default:
-                break
-            }
-        }
-        conn.start(queue: queue)
-    }
-
-    /// Dial through macOS's built-in usbmuxd — no external tunnel needed.
-    /// The handshake is async, so adoption is gated on `dialGeneration`.
-    private func connectUSB(udid: String?, port: UInt16) {
-        dialGeneration += 1
-        let generation = dialGeneration
-        Task { [weak self] in
-            guard let self else { return }
-            do {
-                let conn = try await Usbmux.dial(udid: udid, port: port, queue: queue)
-                queue.async {
-                    guard generation == self.dialGeneration, !self.stopped else {
-                        conn.cancel()
-                        return
-                    }
-                    self.connection = conn
-                    conn.stateUpdateHandler = { [weak self] state in
-                        guard let self else { return }
-                        switch state {
-                        case .failed(let error):
-                            Log.info("usb connection failed: \(error)")
-                            self.connectionReady = false
-                            self.scheduleReconnect()
-                        case .cancelled:
-                            self.connectionReady = false
-                        default:
-                            break
-                        }
-                    }
-                    self.becomeReady(conn)
-                }
-            } catch {
-                queue.async {
-                    guard generation == self.dialGeneration, !self.stopped else { return }
-                    // Distinct guidance per failure: cable missing vs app
-                    // closed. Composed on `queue`: awaitingWake lives there.
-                    let hint: String
-                    switch error as? Usbmux.Failure {
-                    case .noDevice:
-                        hint = "Waiting for a USB device — plug in the iPhone or iPad…"
-                    case .refused:
-                        self.dialRefused()
-                        hint = self.awaitingWake
-                            ? "\(self.endpointName) is asleep — reconnects when it wakes…"
-                            : "Device found — open the OpenDisplay app on it…"
-                    default:
-                        Log.info("usb dial failed: \(error)")
-                        hint = "USB connection failed: \(error.localizedDescription)"
-                    }
-                    Task { await self.status(hint) }
-                    self.scheduleReconnect()
-                }
-            }
-        }
-    }
-
-    private func scheduleReconnect() {
+    private func dropConnection(_ reason: String) {
         guard !stopped else { return }
-        if everConnected {
-            if let since = disconnectedSince {
-                if Date().timeIntervalSince(since) > disconnectGraceSeconds {
-                    reportGone("device gone for >\(Int(disconnectGraceSeconds))s — ending session")
-                    return
-                }
-            } else {
-                disconnectedSince = Date()
-                Task { await status("Connection lost — retrying for \(Int(disconnectGraceSeconds))s…") }
-            }
-        }
+        Log.info("\(endpointName): \(reason)")
         connectionReady = false
-        dialGeneration += 1   // a USB dial still in flight must not adopt
-        let generation = dialGeneration
         connection?.cancel()
         connection = nil
-        pendingSends = 0
+        resetPipelineCounters()
+        inputInjector?.releaseHeldButtons()
+        reportLink(false)
+        reportGone("link down, ending session")
+    }
+
+    private func resetPipelineCounters() {
         pipelineLock.lock()
         pendingEncodes = 0
+        pendingSends = 0
         pipelineLock.unlock()
-        queue.asyncAfter(deadline: .now() + 1.0) { [weak self] in
-            // Generation-guarded so a switchTransport (or another reconnect)
-            // that landed in this 1s window supersedes this dial instead of
-            // racing it — otherwise the queued connect() re-dials the new
-            // transport, briefly running two live connections. (No bare
-            // self-rescheduling asyncAfter — the pattern banned in #76.)
-            guard let self, generation == self.dialGeneration, !self.stopped else { return }
-            self.connect()
-        }
+    }
+
+    private func reportLink(_ up: Bool) {
+        Task { @MainActor in self.onLinkChanged?(up) }
     }
 
     // MARK: - Liveness (ping + watchdog)
@@ -1045,8 +955,7 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
                 self.capWindowStart = Date()
                 let sorted = self.inputLatencies.sorted()
                 let inp50 = sorted.isEmpty ? 0 : sorted[sorted.count / 2].rounded()
-                let inp95 = sorted.isEmpty ? 0 : sorted[min(sorted.count - 1, Int(Double(sorted.count) * 0.95))].rounded()
-                self.sendJSONFrame("{\"type\":\"ping\",\"drops\":\(self.dropsTotal),\"encDrops\":\(self.dropsEncTotal),\"netDrops\":\(self.dropsNetTotal),\"pending\":\(self.pendingSends),\"inp50\":\(inp50),\"inp95\":\(inp95),\"capFps\":\(capFps)}")
+                self.sendJSONFrame("{\"type\":\"ping\",\"drops\":\(self.dropsTotal),\"encDrops\":\(self.dropsEncTotal),\"netDrops\":\(self.dropsNetTotal),\"pending\":\(self.pendingSends),\"inp50\":\(inp50),\"capFps\":\(capFps)}")
             }
             self.schedulePing()
         }
@@ -1056,25 +965,21 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         queue.asyncAfter(deadline: .now() + 2.0) { [weak self] in
             guard let self, !self.stopped else { return }
             if self.connectionReady, Date().timeIntervalSince(self.lastReceived) > 5 {
-                // A suspended receiver app (user switched apps) goes silent
-                // like this while its kernel still accepts redials — the
-                // session and display are kept on purpose so the user's
-                // window arrangement survives until they come back. Genuine
-                // network loss fails the redials and ends via the grace.
-                Log.info("watchdog: nothing from the phone for >5s — reconnecting")
-                // Can't tell a backgrounded receiver from a brief stall here
-                // (both go silent while redials still succeed) — hedge.
-                Task { await self.status("\(self.endpointName) is silent — keeping the display (app in background or brief stall)") }
-                self.scheduleReconnect()
+                // A suspended receiver app (user switched apps, screen off)
+                // goes silent like this. Let the half-open socket go; the
+                // display and the window arrangement stay up for the grace
+                // window so the device resumes into them when it dials back.
+                self.dropConnection("nothing from the device for >5s")
             }
-            // The disconnect grace is otherwise only evaluated when a dial
-            // changes state — a dial stuck in .preparing (withdrawn Bonjour
-            // service) would keep a dead session's display up forever.
-            // Enforce it from here too, where the clock always ticks.
-            if !self.connectionReady, self.everConnected,
-               let since = self.disconnectedSince,
-               Date().timeIntervalSince(since) > self.disconnectGraceSeconds {
-                self.reportGone("device gone for >\(Int(self.disconnectGraceSeconds))s — ending session")
+            // The grace is only evaluated here, where the clock always ticks:
+            // a device that never comes back produces no other event.
+            if !self.connectionReady, let since = self.disconnectedSince {
+                let away = Date().timeIntervalSince(since)
+                if away > self.reconnectGraceSeconds {
+                    self.reportGone("device gone for >\(Int(self.reconnectGraceSeconds))s, ending session")
+                } else if away > self.idleCaptureStopSeconds {
+                    self.suspendCapture()
+                }
             }
             // A reconnect on a static screen produces no capture frames, so
             // the receiver would stay black — replay the last frame as IDR.
@@ -1096,7 +1001,10 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         cursorTimer?.cancel()
         let timer = DispatchSource.makeTimerSource(queue: queue)
         timer.schedule(deadline: .now(), repeating: .milliseconds(8))   // 120Hz
-        timer.setEventHandler { [weak self] in self?.pollCursorPosition() }
+        timer.setEventHandler { [weak self] in
+            guard let self, !self.stopped else { return }
+            self.pollCursorPosition()
+        }
         timer.resume()
         cursorTimer = timer
         scheduleCursorImagePoll()
@@ -1178,15 +1086,70 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
 
     private func receiveControl(on conn: NWConnection) {
         conn.receive(minimumIncompleteLength: 4, maximumLength: 4) { [weak self] data, _, _, error in
-            guard let self, error == nil, let data, data.count == 4 else { return }
+            guard let self else { return }
+            guard error == nil, let data, data.count == 4 else {
+                self.dropConnection(conn, "peer closed")
+                return
+            }
             let len = Int(UInt32(bigEndian: data.withUnsafeBytes { $0.loadUnaligned(as: UInt32.self) }))
-            guard len > 0, len < 1 << 20 else { return }
+            guard len > 0, len < 1 << 20 else {
+                self.dropConnection(conn, "framing error")
+                return
+            }
             conn.receive(minimumIncompleteLength: len, maximumLength: len) { [weak self] payload, _, _, error in
-                guard let self, error == nil, let payload, payload.count == len else { return }
-                self.handleControl(payload)
-                self.receiveControl(on: conn)
+                guard let self else { return }
+                guard error == nil, let payload, payload.count == len else {
+                    self.dropConnection(conn, "peer closed")
+                    return
+                }
+                self.queue.async {
+                    guard self.connection === conn, !self.stopped else { return }
+                    self.handleControl(payload)
+                    self.receiveControl(on: conn)
+                }
             }
         }
+    }
+
+    private func dropConnection(_ conn: NWConnection, _ reason: String) {
+        queue.async {
+            guard self.connection === conn else { return }
+            self.dropConnection(reason)
+        }
+    }
+
+    private func wireModifiers(_ obj: [String: Any]) -> Int {
+        guard let mods = obj["mods"] as? Double else { return 0 }
+        return Int(exactly: mods.rounded()) ?? 0
+    }
+
+    private func finite(_ obj: [String: Any], _ key: String) -> Double? {
+        guard let value = obj[key] as? Double, value.isFinite else { return nil }
+        return value
+    }
+
+    private func recordPointerSample(phase: String, x: Double, y: Double) {
+        guard phase == "moved" else {
+            lastMovedNorm = nil
+            lastMovedDelta = nil
+            return
+        }
+        defer { lastMovedNorm = (x, y) }
+        guard let previous = lastMovedNorm else { return }
+        let delta = (x: x - previous.x, y: y - previous.y)
+        guard hypot(delta.x, delta.y) > 0.0005 else { return }
+        defer { lastMovedDelta = delta }
+        guard let last = lastMovedDelta else { return }
+        dragSamples += 1
+        if delta.x * last.x + delta.y * last.y < 0 { dragReversals += 1 }
+    }
+
+    private func recordInputLatency(_ obj: [String: Any]) {
+        guard let t = obj["t"] as? Double else { return }
+        let delta = Date().timeIntervalSince1970 * 1000 - t
+        guard delta > -50, delta < 1000 else { return }
+        inputLatencies.append(max(delta, 0))
+        if inputLatencies.count > 240 { inputLatencies.removeFirst(120) }
     }
 
     private func handleControl(_ payload: Data) {
@@ -1214,81 +1177,51 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
             // so one file holds both ends of the story.
             if let json = try? JSONSerialization.data(withJSONObject: obj),
                let line = String(data: json, encoding: .utf8) {
-                Log.info("PHONE-STATS \(line) | mac enc↓=\(dropsEncThisWindow) net↓=\(dropsNetThisWindow) pending=\(pendingSends)")
+                Log.info("PHONE-STATS \(line) | mac enc↓=\(dropsEncThisWindow) net↓=\(dropsNetThisWindow) pending=\(pendingSends) pointerReversals=\(dragReversals)/\(dragSamples)")
                 dropsEncThisWindow = 0
                 dropsNetThisWindow = 0
+                dragReversals = 0
+                dragSamples = 0
             }
         case "hello":
             if let info = try? JSONDecoder().decode(PhoneInfo.self, from: payload) {
-                let previous = lastHello
-                lastHello = info
-                Task { @MainActor in self.onHello?(info) }
-                // Version handshake (issue #132). Reply with our identity, and
-                // if the receiver is below the version we support, tell it to
-                // update. Both are additive: older receivers ignore unknown
-                // message types. Sending on every hello is idempotent — the
-                // phone dedupes by content.
-                sendWelcome()
-                if info.protocolVersion < WireProtocol.minSupportedPeer {
-                    Log.info("receiver protocol \(info.protocolVersion) below supported \(WireProtocol.minSupportedPeer) — requesting update")
-                    sendUpdateRequired(kind: info.kind)
+                guard info.isUsablePanel else {
+                    Log.info("ignoring an out-of-range hello: "
+                        + "\(info.pixelsWide)x\(info.pixelsHigh) @\(info.scale)x")
+                    return
                 }
-                if let continuation = helloContinuation {
-                    helloContinuation = nil
-                    continuation.resume(returning: info)
-                } else if mode == .extend, stream != nil, let previous,
-                          previous.pixelsWide != info.pixelsWide
-                          || previous.pixelsHigh != info.pixelsHigh {
-                    // Phone rotated — rebuild after a short debounce so a
-                    // flurry of orientation flips settles into one rebuild.
-                    Task {
-                        try? await Task.sleep(for: .milliseconds(300))
-                        guard let current = self.lastHello,
-                              current.pixelsWide == info.pixelsWide,
-                              current.pixelsHigh == info.pixelsHigh else { return }
-                        await self.reconfigure(info)
-                    }
-                }
+                applyHello(info)
             }
         case "touch":
             if let phase = obj["phase"] as? String,
-               let x = obj["x"] as? Double,
-               let y = obj["y"] as? Double {
-                inputInjector?.handleTouch(phase: phase, x: x, y: y)
-                if let t = obj["t"] as? Double {
-                    let delta = Date().timeIntervalSince1970 * 1000 - t
-                    if delta > -50, delta < 1000 {
-                        inputLatencies.append(max(delta, 0))
-                        if inputLatencies.count > 240 { inputLatencies.removeFirst(120) }
-                    }
-                }
+               let x = finite(obj, "x"),
+               let y = finite(obj, "y") {
+                recordPointerSample(phase: phase, x: x, y: y)
+                inputInjector?.handleTouch(phase: phase, x: x, y: y,
+                                           mods: wireModifiers(obj))
+                recordInputLatency(obj)
             }
         case "scroll":
-            if let dx = obj["dx"] as? Double, let dy = obj["dy"] as? Double {
-                inputInjector?.handleScroll(dx: dx, dy: dy)
+            if let dx = finite(obj, "dx"), let dy = finite(obj, "dy") {
+                inputInjector?.handleScroll(dx: dx, dy: dy,
+                                            mods: wireModifiers(obj))
             }
         case "pencil":
             if let phase = obj["phase"] as? String,
-               let x = obj["x"] as? Double,
-               let y = obj["y"] as? Double {
+               let x = finite(obj, "x"),
+               let y = finite(obj, "y") {
                 inputInjector?.handlePencil(
                     phase: phase, x: x, y: y,
-                    pressure: obj["pressure"] as? Double ?? 0,
-                    azimuth: obj["azimuth"] as? Double ?? 0,
-                    altitude: obj["altitude"] as? Double ?? (.pi / 2),
-                    rotation: obj["rotation"] as? Double ?? 0)
-                if let t = obj["t"] as? Double {
-                    let delta = Date().timeIntervalSince1970 * 1000 - t
-                    if delta > -50, delta < 1000 {
-                        inputLatencies.append(max(delta, 0))
-                        if inputLatencies.count > 240 { inputLatencies.removeFirst(120) }
-                    }
-                }
+                    pressure: finite(obj, "pressure") ?? 0,
+                    azimuth: finite(obj, "azimuth") ?? 0,
+                    altitude: finite(obj, "altitude") ?? (.pi / 2),
+                    rotation: finite(obj, "rotation") ?? 0)
+                recordInputLatency(obj)
             }
         case "proximity":
             if let entering = obj["entering"] as? Bool,
-               let x = obj["x"] as? Double,
-               let y = obj["y"] as? Double {
+               let x = finite(obj, "x"),
+               let y = finite(obj, "y") {
                 inputInjector?.handleProximity(entering: entering, x: x, y: y)
             }
         case "kf":
@@ -1297,17 +1230,48 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
             Log.info("phone requested keyframe")
             needsKeyframe = true
         case WireMessage.sleeping:
-            // The device locked and is about to close on us. Hand the
-            // session to the controller right away: it tears the virtual
-            // display down (returning the cursor to a visible screen) and
-            // starts a wake-waiting replacement session.
-            Log.info("receiver went to sleep — ending session, reconnect armed for wake")
-            Task { @MainActor in self.onPeerSleeping?() }
+            // The device locked: nobody can see this display, and the cursor
+            // must not be stranded on it. A deliberate goodbye, so the session
+            // ends now instead of holding the grace window open.
+            Log.info("receiver went to sleep, ending session")
+            Task { @MainActor in self.onPeerGoodbye?() }
         case WireMessage.closing:
-            // The app on the device is quitting for real — end the session
-            // without the silence grace and without waiting for a wake.
+            // The app on the device is quitting for real.
             Log.info("receiver app closed — ending session")
-            Task { @MainActor in self.onPeerClosed?() }
+            Task { @MainActor in self.onPeerGoodbye?() }
+        case WireMessage.key:
+            if let phase = obj["phase"] as? String,
+               let key = obj["key"] as? String {
+                inputInjector?.handleKey(phase: phase, key: key,
+                                         mods: wireModifiers(obj))
+            }
+        case WireMessage.text:
+            if let text = obj["text"] as? String {
+                let injector = inputInjector
+                injector?.handleText(String(text.prefix(maxInjectedTextLength)),
+                                     mods: wireModifiers(obj))
+                handleTextInjectionLogAction(
+                    textInjectionLogPolicy.record(
+                        injector != nil,
+                        at: ProcessInfo.processInfo.systemUptime
+                    )
+                )
+            }
+        case WireMessage.prefs:
+            let prefs = StreamPrefs.decoded(quality: obj["quality"] as? String,
+                                            audio: obj["audio"] as? Bool)
+            Log.info("device prefs: quality=\(prefs.quality.rawValue) audio=\(prefs.audio)")
+            setAudioRequested(prefs.audio)
+            Task { @MainActor in self.onPrefs?(prefs) }
+        case WireMessage.mouse:
+            if let button = obj["button"] as? String,
+               let phase = obj["phase"] as? String,
+               let x = finite(obj, "x"),
+               let y = finite(obj, "y") {
+                inputInjector?.handleMouse(button: button, phase: phase, x: x, y: y,
+                                           mods: wireModifiers(obj))
+                recordInputLatency(obj)
+            }
         default:
             // Unknown types are a normal consequence of the additive wire
             // protocol: a newer peer can send messages this build predates.
@@ -1325,16 +1289,34 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         }
     }
 
-    private func waitForHello() async throws -> PhoneInfo {
-        if let lastHello { return lastHello }
-        return try await withCheckedThrowingContinuation { continuation in
-            queue.async {
-                if let hello = self.lastHello {
-                    continuation.resume(returning: hello)
-                } else {
-                    self.helloContinuation = continuation
-                }
+    private func applyHello(_ info: PhoneInfo) {
+        let previous = lastHello
+        lastHello = info
+        Task { @MainActor in self.onHello?(info) }
+        // Version handshake (issue #132). Reply with our identity.
+        // Additive: older receivers ignore unknown message types.
+        sendWelcome()
+        if info.protocolVersion < WireProtocol.minSupportedPeer {
+            Log.info("receiver protocol \(info.protocolVersion) below supported \(WireProtocol.minSupportedPeer)")
+        }
+        let rotated = previous.pixelsWide != info.pixelsWide
+            || previous.pixelsHigh != info.pixelsHigh
+        if captureSuspended {
+            if rotated {
+                Task { await self.reconfigure(info) }
+            } else {
+                resumeCapture()
             }
+            return
+        }
+        guard stream != nil, rotated else { return }
+        // The device rotated (possibly while it was away), so rebuild after a
+        // short debounce so a flurry of orientation flips settles into one.
+        Task {
+            try? await Task.sleep(for: .milliseconds(300))
+            guard self.lastHello.pixelsWide == info.pixelsWide,
+                  self.lastHello.pixelsHigh == info.pixelsHigh else { return }
+            await self.reconfigure(info)
         }
     }
 
@@ -1640,6 +1622,30 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         Log.info("unparseable control message (\(report.detail) bytes, \(report.count) since last report)")
     }
 
+    private func handleTextInjectionLogAction(_ action: ThrottledLogPolicy<Bool>.Action) {
+        switch action {
+        case .report(let report):
+            reportTextInjection(report)
+        case .schedule(let delay):
+            queue.asyncAfter(deadline: .now() + delay) { [weak self] in
+                self?.flushTextInjectionLog()
+            }
+        case .none:
+            break
+        }
+    }
+
+    private func flushTextInjectionLog() {
+        if let report = textInjectionLogPolicy.flush(at: ProcessInfo.processInfo.systemUptime) {
+            reportTextInjection(report)
+        }
+    }
+
+    private func reportTextInjection(_ report: ThrottledLogPolicy<Bool>.Report) {
+        let fate = report.detail ? "injected" : "dropped, no injector"
+        Log.info("text wire messages: \(report.count) since last report (\(fate); content never logged)")
+    }
+
     // MARK: - H.264 -> Annex B
 
     private func annexB(from sample: CMSampleBuffer) -> Data? {
@@ -1689,10 +1695,6 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         return !(dict[kCMSampleAttachmentKey_NotSync] as? Bool ?? false)
     }
 
-    // MARK: - Wire framing: [4-byte big-endian length][payload]
-
-    /// Control messages on the video channel (pong etc.) — framed JSON without
-    /// start codes; the receiver routes payloads starting with '{'.
     // MARK: - Version handshake (issue #132)
 
     /// Identify ourselves to the receiver: our protocol version and the oldest
@@ -1701,53 +1703,46 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         sendJSONFrame("{\"type\":\"\(WireMessage.welcome)\",\"pv\":\(WireProtocol.version),\"min\":\(WireProtocol.minSupportedPeer)}")
     }
 
-    /// Ask the receiver to update from the App Store (built via JSONSerialization
-    /// because the message text is user-facing prose).
-    private func sendUpdateRequired(kind: String) {
-        let dict: [String: Any] = [
-            "type": WireMessage.updateRequired,
-            "target": "ios",
-            "store": AppStore.updateURL.absoluteString,
-            "message": "This \(kind) app is too old for this Mac. Update OpenDisplay from the App Store to reconnect.",
-        ]
-        if let data = try? JSONSerialization.data(withJSONObject: dict),
-           let json = String(data: data, encoding: .utf8) {
-            sendJSONFrame(json)
-        }
-    }
+    // MARK: - Wire framing: [4-byte big-endian length][payload]
 
+    /// Control messages on the video channel (pong etc.) — framed JSON without
+    /// start codes; the receiver routes payloads starting with '{'.
     private func sendJSONFrame(_ json: String) {
         guard let connection, connectionReady else { return }
-        let payload = Data(json.utf8)
+        connection.send(content: lengthPrefixed(Data(json.utf8)),
+                        completion: .contentProcessed { _ in })
+    }
+
+    private func lengthPrefixed(_ payload: Data) -> Data {
         var header = UInt32(payload.count).bigEndian
         var frame = Data(bytes: &header, count: 4)
         frame.append(payload)
-        connection.send(content: frame, completion: .contentProcessed { _ in })
+        return frame
     }
 
     private func sendFramed(_ payload: Data) {
         guard let connection, connectionReady else { return }
-        var header = UInt32(payload.count).bigEndian
-        var frame = Data(bytes: &header, count: 4)
-        frame.append(payload)
+        let frame = lengthPrefixed(payload)
+        pipelineLock.lock()
         pendingSends += 1
+        pipelineLock.unlock()
         connection.send(content: frame, completion: .contentProcessed { [weak self] error in
             guard let self else { return }
-            self.pendingSends -= 1
+            self.pipelineLock.lock()
+            self.pendingSends = max(0, self.pendingSends - 1)
+            self.pipelineLock.unlock()
             if let error {
                 Log.info("send error: \(error)")
                 return
             }
-            self.framesSent += 1
             self.bytesSent += frame.count
             // Report stats roughly once a second.
             let elapsed = Date().timeIntervalSince(self.statsWindowStart)
             if elapsed >= 1.0 {
                 let mbps = Double(self.bytesSent) * 8 / elapsed / 1_000_000
-                let frames = self.framesSent
                 self.bytesSent = 0
                 self.statsWindowStart = Date()
-                Task { @MainActor in self.onStats?(frames, mbps) }
+                Task { @MainActor in self.onStats?(mbps) }
             }
         })
     }

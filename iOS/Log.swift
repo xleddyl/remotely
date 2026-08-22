@@ -3,7 +3,7 @@ import Foundation
 /// Logs to NSLog (visible via `log stream` / simctl) and to a file in the
 /// app's Documents directory.
 ///
-/// The file exists so a WiFi or USB failure can be diagnosed from a bug report
+/// The file exists so a connection failure can be diagnosed from a bug report
 /// instead of guessed at: nobody filing an issue is going to attach a Mac to
 /// their phone and run `log stream`. `snapshot(context:completion:)` turns it
 /// into something shareable from Settings & Help.
@@ -11,7 +11,7 @@ enum Log {
     private static let queue = DispatchQueue(label: "log")
     private static let fileURL: URL = {
         let docs = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
-        return docs.appendingPathComponent("opensidecar-phone.log")
+        return docs.appendingPathComponent("remotely-phone.log")
     }()
 
     /// Cap on the live file, and what survives a trim.
@@ -33,7 +33,7 @@ enum Log {
     }()
 
     static func info(_ message: String) {
-        NSLog("[opensidecar] %@", message)
+        NSLog("[remotely] %@", message)
         let line = "[\(formatter.string(from: Date()))] \(message)\n"
         guard let data = line.data(using: .utf8) else { return }
         queue.async { append(data) }
@@ -98,7 +98,7 @@ enum Log {
             try text.write(to: url, atomically: true, encoding: .utf8)
             return url
         } catch {
-            NSLog("[opensidecar] could not write the log snapshot: %@", error.localizedDescription)
+            NSLog("[remotely] could not write the log snapshot: %@", error.localizedDescription)
             return nil
         }
     }

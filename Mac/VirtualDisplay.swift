@@ -12,33 +12,22 @@ final class VirtualDisplay {
     private(set) var pointsWide: Int
     private(set) var pointsHigh: Int
 
-    private var restoreTarget: CGPoint?
-    private var restoreUntil: Date
-    private var lastReportedOrigin: CGPoint?
-    private let onOriginChange: ((CGPoint, CGSize) -> Void)?
-
     var displayID: CGDirectDisplayID { display.displayID }
 
     /// Must be called on the main thread. `serialNum` must be unique per
-    /// concurrent display AND stable per device — macOS keys saved display
+    /// concurrent display AND stable per device: macOS keys saved display
     /// arrangement on vendor/product/serial, so a stable serial means each
-    /// device keeps its position in System Settings across sessions.
-    /// `restoreOrigin` overrides that saved arrangement (see manageOrigin);
-    /// `onOriginChange` reports where the display sits afterwards, so the
-    /// caller can persist user drags.
+    /// device keeps its position in System Settings across sessions. The
+    /// arrangement itself is not this type's business, MainDisplayTakeover
+    /// owns the global origin.
     init?(name: String, pointsWide: Int, pointsHigh: Int, sizeInMillimeters: CGSize,
-          serialNum: UInt32 = 0x0001, productID: UInt32 = 0x4F53,
-          restoreOrigin: CGPoint? = nil,
-          onOriginChange: ((CGPoint, CGSize) -> Void)? = nil) {
+          serialNum: UInt32 = 0x0001, productID: UInt32 = 0x4F53) {
         self.pointsWide = pointsWide
         self.pointsHigh = pointsHigh
         // Reserve the longer orientation on both axes. That lets a phone or
         // tablet change orientation by applying a new mode to this *same*
         // virtual monitor instead of removing it and stranding its windows.
         maxPointsPerAxis = max(pointsWide, pointsHigh)
-        self.restoreTarget = restoreOrigin
-        self.restoreUntil = restoreOrigin == nil ? .distantPast : Date().addingTimeInterval(6)
-        self.onOriginChange = onOriginChange
 
         let descriptor = CGVirtualDisplayDescriptor()
         descriptor.setDispatchQueue(DispatchQueue.main)
@@ -84,7 +73,6 @@ final class VirtualDisplay {
                     guard let self else { return }
                     self.ensureNotMirrored()
                     if self.selectHiDPIMode(recover: settled) { settled = true }
-                    self.manageOrigin()
                 }
                 try? await Task.sleep(for: .milliseconds(settled ? 2000 : 200))
             }
@@ -99,7 +87,7 @@ final class VirtualDisplay {
     ///
     /// Must be called on the main thread.
     @discardableResult
-    func resize(pointsWide: Int, pointsHigh: Int, movingTo origin: CGPoint?) -> Bool {
+    func resize(pointsWide: Int, pointsHigh: Int) -> Bool {
         guard pointsWide <= maxPointsPerAxis, pointsHigh <= maxPointsPerAxis else {
             Log.info("virtual display \(display.displayID) cannot resize beyond its descriptor")
             return false
@@ -118,28 +106,7 @@ final class VirtualDisplay {
         self.pointsWide = pointsWide
         self.pointsHigh = pointsHigh
 
-        if let origin {
-            var config: CGDisplayConfigRef?
-            if CGBeginDisplayConfiguration(&config) == .success {
-                CGConfigureDisplayOrigin(config, display.displayID, Int32(origin.x), Int32(origin.y))
-                let err = CGCompleteDisplayConfiguration(config, .permanently)
-                // A mode change is a display reconfiguration, so macOS may
-                // restore ITS arrangement for this identity a moment later,
-                // exactly as it does after creation. Re-arm the same window so
-                // that gets overridden, and adopt whatever WindowServer settled
-                // on: a snap is system state, and persisting it as if it were a
-                // user drag is the ratchet #203 is about.
-                let settled = CGDisplayBounds(display.displayID).origin
-                restoreTarget = settled
-                restoreUntil = Date().addingTimeInterval(6)
-                lastReportedOrigin = settled
-                Log.info("virtual display \(display.displayID) resized to \(pointsWide)x\(pointsHigh)pt "
-                    + "at (\(Int(origin.x)),\(Int(origin.y))), settled "
-                    + "(\(Int(settled.x)),\(Int(settled.y))) (result \(err.rawValue))")
-            }
-        } else {
-            Log.info("virtual display \(display.displayID) resized to \(pointsWide)x\(pointsHigh)pt")
-        }
+        Log.info("virtual display \(display.displayID) resized to \(pointsWide)x\(pointsHigh)pt")
         return true
     }
 
@@ -173,55 +140,15 @@ final class VirtualDisplay {
         return err == .success
     }
 
-    /// Arrangement restore + observation (#116). For the first few seconds,
-    /// assert `restoreTarget`: macOS restores ITS saved arrangement for this
-    /// display identity asynchronously, seconds after creation, and that
-    /// record is stale or default whenever the identity is fresh (rotation
-    /// swaps the serial, transport switches change it) — the caller's
-    /// device-keyed record must win. Afterwards, origin changes are the user
-    /// rearranging: report them so the caller can persist the new spot.
-    private func manageOrigin() {
-        let id = display.displayID
-        let origin = CGDisplayBounds(id).origin
-        if let target = restoreTarget, Date() < restoreUntil {
-            // Initial arrangement is system state, not a user drag. Mark it
-            // observed so it cannot overwrite the saved device placement
-            // when the restore window expires (#203).
-            guard origin != target else {
-                lastReportedOrigin = origin
-                return
-            }
-            var config: CGDisplayConfigRef?
-            guard CGBeginDisplayConfiguration(&config) == .success else { return }
-            CGConfigureDisplayOrigin(config, id, Int32(target.x), Int32(target.y))
-            let err = CGCompleteDisplayConfiguration(config, .permanently)
-            // WindowServer snaps the requested origin to the nearest valid
-            // arrangement — adopt what it settled on, or every remaining
-            // tick of the window would re-apply against the snap.
-            restoreTarget = CGDisplayBounds(id).origin
-            // A snap is also system state. Keep observing from the settled
-            // point, but only a later origin change may be a user drag.
-            lastReportedOrigin = restoreTarget
-            Log.info("display \(id) origin (\(Int(origin.x)),\(Int(origin.y))) → restored "
-                + "(\(Int(target.x)),\(Int(target.y))), settled "
-                + "(\(Int(restoreTarget!.x)),\(Int(restoreTarget!.y))) (result \(err.rawValue))")
-            return
-        }
-        if origin != lastReportedOrigin {
-            lastReportedOrigin = origin
-            onOriginChange?(origin, CGSize(width: pointsWide, height: pointsHigh))
-        }
-    }
-
-    /// An extend-mode virtual display must never sit in a system mirror set.
+    /// A virtual display must never sit in a system mirror set.
     /// macOS can drop it there on its own — e.g. when it misclassifies the
     /// display as a TV, whose arrangement default is "Mirror Entire Screen"
     /// (issue #100) — and that arrangement is saved per vendor/product/serial,
     /// so a stable serial means it's restored every session and the device is
     /// stuck mirroring. Detaching is enforcement, not a one-shot: like the
-    /// HiDPI mode, re-break it whenever macOS re-mirrors it. Mirror mode never
-    /// builds a VirtualDisplay (it captures the main display instead), so a
-    /// VirtualDisplay in a mirror set is always wrong — safe to always undo.
+    /// HiDPI mode, re-break it whenever macOS re-mirrors it. This display
+    /// exists to be the Mac's main screen, which means a desktop of its own,
+    /// so finding it in a mirror set is always wrong and always safe to undo.
     private func ensureNotMirrored() {
         let id = display.displayID
         guard CGDisplayIsInMirrorSet(id) != 0 else { return }
@@ -247,6 +174,6 @@ final class VirtualDisplay {
         // the display's lifetime, so it re-overrides whatever mirror arrangement
         // macOS restores — continuous enforcement, like the HiDPI mode above.
         let err = CGCompleteDisplayConfiguration(config, .forSession)
-        Log.info("virtual display \(id) was in a mirror set — detached to extend (result \(err.rawValue))")
+        Log.info("virtual display \(id) was in a mirror set, detached to its own desktop (result \(err.rawValue))")
     }
 }

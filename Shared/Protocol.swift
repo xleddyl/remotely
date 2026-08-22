@@ -11,11 +11,15 @@ import Foundation
 /// protocol 1 — that's every install in the field that predates the handshake.
 enum WireProtocol {
     /// The protocol version this build speaks.
-    static let version = 3
+    static let version = 5
 
     /// Protocol version that introduced Apple Pencil / proximity wire messages.
     /// Peers below this get pencil input as legacy `touch` events.
     static let pencilWireVersion = 3
+
+    static let keyboardWireVersion = 4
+
+    static let audioWireVersion = 5
 
     /// Oldest peer protocol version this build still supports. Stays at 1
     /// (support everything) until a deliberate two-phase breaking change
@@ -31,7 +35,23 @@ enum WireProtocol {
 /// keep this change additive and low-risk; unify later if we do a wider pass.
 enum WireMessage {
     static let welcome = "welcome"                  // Mac -> phone: Mac's pv + min supported
-    static let updateRequired = "updateRequired"    // Mac -> phone: peer is below the Mac's floor
     static let sleeping = "sleeping"                // phone -> Mac: device locked, reconnect on wake
     static let closing = "closing"                  // phone -> Mac: app quit, end the session for good
+    static let key = "key"
+    static let text = "text"
+    static let mouse = "mouse"
+    static let prefs = "prefs"
+    static let audioStart = "audioStart"
+    static let audio = "audio"
+}
+
+struct WireModifiers: OptionSet {
+    let rawValue: Int
+
+    static let shift = WireModifiers(rawValue: 1 << 0)
+    static let control = WireModifiers(rawValue: 1 << 1)
+    static let option = WireModifiers(rawValue: 1 << 2)
+    static let command = WireModifiers(rawValue: 1 << 3)
+    static let capsLock = WireModifiers(rawValue: 1 << 4)
+    static let function = WireModifiers(rawValue: 1 << 5)
 }

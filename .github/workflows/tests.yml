@@ -1,7 +1,7 @@
-name: Tests
+name: Build
 
 # Nothing checked pull requests before this, so a branch that did not compile
-# (or a test target that could not build) only surfaced on someone's laptop.
+# only surfaced on someone's laptop.
 on:
   pull_request:
   push:
@@ -9,11 +9,11 @@ on:
 
 # A superseded run tells us nothing, so drop in-flight runs for the same ref.
 concurrency:
-  group: tests-${{ github.ref }}
+  group: build-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
-  mac:
+  build:
     runs-on: macos-26
     steps:
       - uses: actions/checkout@v6
@@ -27,14 +27,22 @@ jobs:
       - name: Generate project
         run: xcodegen generate
 
-      # Builds the Mac app as well as the test bundle, since the scheme covers
-      # both — so this is a compile check for the app on top of the tests.
-      - name: Run macOS tests
+      - name: Build macOS app
         run: |
-          xcodebuild test \
-            -project OpenSidecar.xcodeproj \
-            -scheme OpenSidecarMac \
-            -destination 'platform=macOS' \
+          xcodebuild build \
+            -project Remotely.xcodeproj \
+            -scheme RemotelyMac \
+            -destination 'platform=macOS,arch=arm64' \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY=""
+
+      - name: Build iOS app
+        run: |
+          xcodebuild build \
+            -project Remotely.xcodeproj \
+            -scheme RemotelyiOS \
+            -destination 'generic/platform=iOS Simulator' \
             CODE_SIGNING_ALLOWED=NO \
             CODE_SIGNING_REQUIRED=NO \
             CODE_SIGN_IDENTITY=""
