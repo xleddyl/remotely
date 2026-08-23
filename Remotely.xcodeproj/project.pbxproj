@@ -19,6 +19,7 @@
 		3AB2F531921F4CD874EF80E6 /* VideoLayerView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 342023DB92A2306796A085FF /* VideoLayerView.swift */; };
 		3C72BA91AA46993B330E8510 /* PhoneReceiver.swift in Sources */ = {isa = PBXBuildFile; fileRef = C4D1D0E1BC4F1613B8ADF906 /* PhoneReceiver.swift */; };
 		3C90C0BA3F52AF38612890FC /* ReceiverModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 64C238778C32248EACE199FF /* ReceiverModel.swift */; };
+		3E7A1D5C920B48F6C1D0A374 /* WindowSweeper.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6B24F8E0C13A57D9B4E20185 /* WindowSweeper.swift */; };
 		43DDAC2B25A646FE3A9FB381 /* DisplayBacklight.swift in Sources */ = {isa = PBXBuildFile; fileRef = 04C019EE120506C68AF7DE08 /* DisplayBacklight.swift */; };
 		468EBB46A406ED1E91495388 /* StreamingPrefs.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9395A728197E101B9D264CF9 /* StreamingPrefs.swift */; };
 		4CCF651FD1D9EED29B12D371 /* KeyboardInputView.swift in Sources */ = {isa = PBXBuildFile; fileRef = B8E608297396DD26EC14D0C7 /* KeyboardInputView.swift */; };
@@ -95,6 +96,7 @@
 		5CDFE8A31CB411652D9B20C8 /* ToolbarSettingsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ToolbarSettingsView.swift; sourceTree = "<group>"; };
 		5D0CFFD82A0F02C10AEF3D01 /* InputToolbar.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = InputToolbar.swift; sourceTree = "<group>"; };
 		64C238778C32248EACE199FF /* ReceiverModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ReceiverModel.swift; sourceTree = "<group>"; };
+		6B24F8E0C13A57D9B4E20185 /* WindowSweeper.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WindowSweeper.swift; sourceTree = "<group>"; };
 		6DD0FD717B93293452CDFAF8 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 		7AD02E06CDBDAC1DA3851919 /* CGVirtualDisplayPrivate.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = CGVirtualDisplayPrivate.h; sourceTree = "<group>"; };
 		7C642DDDDC123DF1EC57A6D7 /* ReceiverScreen.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ReceiverScreen.swift; sourceTree = "<group>"; };
@@ -179,6 +181,7 @@
 				DBF0B5F615B8B323D21B0F49 /* SessionLock.swift */,
 				DF280428C9DB16B379B9ED68 /* TestPatternWindow.swift */,
 				D4063A53A19D5B07D2D36A66 /* VirtualDisplay.swift */,
+				6B24F8E0C13A57D9B4E20185 /* WindowSweeper.swift */,
 			);
 			path = Mac;
 			sourceTree = "<group>";
@@ -427,6 +430,7 @@
 				468EBB46A406ED1E91495388 /* StreamingPrefs.swift in Sources */,
 				527870E919DBE8CE9B02F7E7 /* TestPatternWindow.swift in Sources */,
 				B3434D6EE2A131F7750BE9D2 /* VirtualDisplay.swift in Sources */,
+				3E7A1D5C920B48F6C1D0A374 /* WindowSweeper.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

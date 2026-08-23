@@ -51,6 +51,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         MainDisplayTakeover.shared.releaseNow()
         OutputMuter.shared.release()
         LocalInputBlocker.shared.release()
+        WindowSweeper.shared.release()
     }
 
     // Background/Dock modes: opening the app again (Spotlight, Finder, Dock

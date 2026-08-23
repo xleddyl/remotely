@@ -244,6 +244,7 @@ final class SenderController: ObservableObject {
         refreshMainDisplayTakeover()
         refreshOutputMute()
         refreshLocalInputBlock()
+        refreshWindowSweep()
     }
 
     /// The virtual display that should own the Mac's global origin: the first
@@ -280,6 +281,15 @@ final class SenderController: ObservableObject {
         } else {
             LocalInputBlocker.shared.release()
         }
+    }
+
+    private func refreshWindowSweep() {
+        guard let takeover = takeoverDisplayID else {
+            WindowSweeper.shared.release()
+            return
+        }
+        let owned = Set(sessions.compactMap { $0.failed ? nil : $0.mainDisplayID })
+        WindowSweeper.shared.engage(target: takeover, allowed: owned)
     }
 
     private func refreshPowerPolicy() {
