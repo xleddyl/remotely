@@ -34,13 +34,13 @@ struct VideoLayerView: UIViewRepresentable {
         let view = VideoView()
         view.backgroundColor = .black
         view.isMultipleTouchEnabled = true
+        view.clipsToBounds = true
         view.receiver = receiver
         view.input = input
         view.pointerModeEnabled = touchInputMode == "pointer"
         view.pointerSpeed = pointerSpeed
 
-        displayLayer.frame = view.bounds
-        view.layer.addSublayer(displayLayer)
+        view.attachContent(displayLayer)
 
         view.inputEngine.normalize = { [weak view] point in view?.normalized(point) }
         view.inputEngine.onPencil = { [weak receiver] phase, x, y, pressure, azimuth, altitude in
@@ -57,6 +57,16 @@ struct VideoLayerView: UIViewRepresentable {
         pan.minimumNumberOfTouches = 2
         pan.maximumNumberOfTouches = 2
         view.addGestureRecognizer(pan)
+
+        let pinch = UIPinchGestureRecognizer(target: view, action: #selector(VideoView.didPinch(_:)))
+        pinch.delegate = view
+        view.addGestureRecognizer(pinch)
+
+        let twoFingerTap = UITapGestureRecognizer(
+            target: view, action: #selector(VideoView.didTwoFingerTap(_:)))
+        twoFingerTap.numberOfTouchesRequired = 2
+        twoFingerTap.numberOfTapsRequired = 1
+        view.addGestureRecognizer(twoFingerTap)
 
         let longPress = UILongPressGestureRecognizer(
             target: view, action: #selector(VideoView.didLongPress(_:)))
@@ -88,7 +98,7 @@ struct VideoLayerView: UIViewRepresentable {
         uiView.setNeedsLayout()
     }
 
-    final class VideoView: UIView {
+    final class VideoView: UIView, UIGestureRecognizerDelegate {
         weak var receiver: PhoneReceiver?
         weak var input: InputController?
         var pointerModeEnabled = false { didSet { pointerModeDidChange(from: oldValue) } }
@@ -118,7 +128,12 @@ struct VideoLayerView: UIViewRepresentable {
         }
 
         func releaseSoftKeyboard() {
-            if keyboardInput.isFirstResponder { _ = keyboardInput.resignFirstResponder() }
+            let ownedKeyboard = keyboardInput.isFirstResponder
+            _ = keyboardInput.resignFirstResponder()
+            if !ownedKeyboard {
+                UIApplication.shared.sendAction(#selector(UIResponder.resignFirstResponder),
+                                                to: nil, from: nil, for: nil)
+            }
             becomeHardwareKeyResponder()
         }
 
@@ -167,22 +182,46 @@ struct VideoLayerView: UIViewRepresentable {
         private var cursorNorm = CGPoint(x: 0.5, y: 0.5)
         private var cursorVisible = false
 
+        private let contentLayer: CALayer = {
+            let layer = CALayer()
+            layer.anchorPoint = .zero
+            return layer
+        }()
+        private weak var videoLayer: CALayer?
+
+        func attachContent(_ layer: CALayer) {
+            videoLayer = layer
+            layer.frame = bounds
+            contentLayer.frame = bounds
+            contentLayer.addSublayer(layer)
+            contentLayer.addSublayer(cursorLayer)
+            self.layer.addSublayer(contentLayer)
+        }
+
         private var lastLoggedLayout = ""
+        private var lastVideoSize = CGSize.zero
 
         override func layoutSubviews() {
             super.layoutSubviews()
+            let video = receiver?.videoSize ?? .zero
+            if video != lastVideoSize {
+                lastVideoSize = video
+                resetZoom()
+            }
             CATransaction.begin()
             CATransaction.setDisableActions(true)
+            contentLayer.bounds = CGRect(origin: .zero, size: bounds.size)
+            contentLayer.position = .zero
             // AVSBDL aspect-fits internally (videoGravity) — full bounds.
-            layer.sublayers?.first?.frame = bounds
-            if cursorLayer.superlayer == nil { layer.addSublayer(cursorLayer) }
+            videoLayer?.frame = contentLayer.bounds
+            if cursorLayer.superlayer == nil { contentLayer.addSublayer(cursorLayer) }
+            applyZoomTransform()
             updateCursorLayout()
             CATransaction.commit()
             // Rotation diagnostics — one line per layout change.
-            let video = receiver?.videoSize ?? .zero
             let line = "layout: bounds=\(Int(bounds.width))x\(Int(bounds.height))"
                 + " video=\(Int(video.width))x\(Int(video.height))"
-                + " layer=\(Int(layer.sublayers?.first?.frame.width ?? -1))x\(Int(layer.sublayers?.first?.frame.height ?? -1))"
+                + " layer=\(Int(videoLayer?.frame.width ?? -1))x\(Int(videoLayer?.frame.height ?? -1))"
             if line != lastLoggedLayout {
                 lastLoggedLayout = line
                 Log.info(line)
@@ -190,6 +229,92 @@ struct VideoLayerView: UIViewRepresentable {
             if let window {
                 receiver?.setWindowSafeArea(window.safeAreaInsets)
             }
+        }
+
+        private var zoomScale: CGFloat = 1
+        private var zoomOffset = CGPoint.zero
+        private var pinchActive = false
+        private var pinchSuppressesScroll = false
+        private var pinchStartScale: CGFloat = 1
+        private var pinchStartOffset = CGPoint.zero
+        private var pinchAnchor = CGPoint.zero
+
+        private let minZoom: CGFloat = 1
+        private let maxZoom: CGFloat = 4
+        private let zoomSnapsBackBelow: CGFloat = 1.15
+        private let pinchScrollSlop: CGFloat = 0.06
+
+        private func applyZoomTransform() {
+            var transform = CATransform3DMakeTranslation(zoomOffset.x, zoomOffset.y, 0)
+            transform = CATransform3DScale(transform, zoomScale, zoomScale, 1)
+            contentLayer.transform = transform
+        }
+
+        private func clampedZoomOffset(_ offset: CGPoint, scale: CGFloat) -> CGPoint {
+            CGPoint(x: min(0, max(bounds.width * (1 - scale), offset.x)),
+                    y: min(0, max(bounds.height * (1 - scale), offset.y)))
+        }
+
+        private func setZoom(scale: CGFloat, offset: CGPoint) {
+            zoomScale = min(max(scale, minZoom), maxZoom)
+            zoomOffset = clampedZoomOffset(offset, scale: zoomScale)
+            CATransaction.begin()
+            CATransaction.setDisableActions(true)
+            applyZoomTransform()
+            CATransaction.commit()
+        }
+
+        private func resetZoom() {
+            pinchSuppressesScroll = false
+            setZoom(scale: 1, offset: .zero)
+        }
+
+        private func snapZoomBack() {
+            zoomScale = 1
+            zoomOffset = .zero
+            CATransaction.begin()
+            CATransaction.setAnimationDuration(0.22)
+            CATransaction.setAnimationTimingFunction(CAMediaTimingFunction(name: .easeOut))
+            applyZoomTransform()
+            CATransaction.commit()
+        }
+
+        private func contentPoint(_ point: CGPoint) -> CGPoint {
+            guard zoomScale != 1 else { return point }
+            return CGPoint(x: (point.x - zoomOffset.x) / zoomScale,
+                           y: (point.y - zoomOffset.y) / zoomScale)
+        }
+
+        @objc func didPinch(_ recognizer: UIPinchGestureRecognizer) {
+            switch recognizer.state {
+            case .began:
+                pinchActive = true
+                pinchStartScale = zoomScale
+                pinchStartOffset = zoomOffset
+                pinchAnchor = recognizer.location(in: self)
+                if zoomScale > 1 { pinchSuppressesScroll = true }
+            case .changed:
+                guard pinchActive else { return }
+                if abs(recognizer.scale - 1) > pinchScrollSlop { pinchSuppressesScroll = true }
+                let scale = min(max(pinchStartScale * recognizer.scale, minZoom), maxZoom)
+                let anchor = CGPoint(x: (pinchAnchor.x - pinchStartOffset.x) / pinchStartScale,
+                                     y: (pinchAnchor.y - pinchStartOffset.y) / pinchStartScale)
+                let centroid = recognizer.location(in: self)
+                setZoom(scale: scale,
+                        offset: CGPoint(x: centroid.x - anchor.x * scale,
+                                        y: centroid.y - anchor.y * scale))
+            default:
+                guard pinchActive else { return }
+                pinchActive = false
+                guard zoomScale < zoomSnapsBackBelow else { return }
+                snapZoomBack()
+                pinchSuppressesScroll = true
+            }
+        }
+
+        func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer,
+                               shouldRecognizeSimultaneouslyWith other: UIGestureRecognizer) -> Bool {
+            gestureRecognizer is UIPinchGestureRecognizer && other is UIPanGestureRecognizer
         }
 
         private func videoFitScale(_ video: CGSize) -> CGFloat {
@@ -211,8 +336,9 @@ struct VideoLayerView: UIViewRepresentable {
         // displayed video rect and normalize to [0,1].
         fileprivate func normalized(_ point: CGPoint) -> (x: Double, y: Double)? {
             guard let rect = videoRect() else { return nil }
-            return (Double(clamp01((point.x - rect.minX) / rect.width)),
-                    Double(clamp01((point.y - rect.minY) / rect.height)))
+            let content = contentPoint(point)
+            return (Double(clamp01((content.x - rect.minX) / rect.width)),
+                    Double(clamp01((content.y - rect.minY) / rect.height)))
         }
 
         private func clamp01<Value: FloatingPoint>(_ value: Value) -> Value {
@@ -222,8 +348,11 @@ struct VideoLayerView: UIViewRepresentable {
         func resetGestureState() {
             discardPendingDown()
             cancelPointerGesture()
+            pointerLastTapAt = 0
             rightClickActive = false
             twoFingerActive = false
+            pinchActive = false
+            resetZoom()
         }
 
         func moveCursor(x: Double, y: Double, visible: Bool) {
@@ -273,12 +402,6 @@ struct VideoLayerView: UIViewRepresentable {
             return view === self || view.isDescendant(of: self)
         }
 
-        private func fingersOnVideo(in event: UIEvent?) -> Int {
-            guard let all = event?.allTouches else { return 1 }
-            let mine = all.filter(ownsFinger)
-            return mine.isEmpty ? 1 : mine.count
-        }
-
         private func liveFingersOnVideo(in event: UIEvent?) -> Int {
             guard let all = event?.allTouches else { return 1 }
             return all.filter {
@@ -296,11 +419,13 @@ struct VideoLayerView: UIViewRepresentable {
             case .began:
                 twoFingerActive = true
                 lastPan = .zero
+                if !pinchActive { pinchSuppressesScroll = false }
                 if pointerModeEnabled {
                     cancelPointerGesture()
                     pointerLastTapAt = 0
                     return
                 }
+                guard zoomScale == 1, !pinchActive else { return }
                 // macOS delivers scroll to whatever sits under the cursor, and
                 // the cursor no longer follows the fingers now that a press is
                 // withheld until it commits. Put it on the gesture once, up
@@ -313,26 +438,45 @@ struct VideoLayerView: UIViewRepresentable {
                 }
             case .changed:
                 let translation = recognizer.translation(in: self)
+                let delta = CGPoint(x: translation.x - lastPan.x, y: translation.y - lastPan.y)
+                lastPan = translation
+                if pinchActive { return }
+                if zoomScale > 1 {
+                    setZoom(scale: zoomScale,
+                            offset: CGPoint(x: zoomOffset.x + delta.x,
+                                            y: zoomOffset.y + delta.y))
+                    return
+                }
+                guard !pinchSuppressesScroll else { return }
                 let scale = videoFitScale(video)
                 // Deltas in video pixels, natural-scrolling direction.
-                receiver?.sendScroll(dx: (translation.x - lastPan.x) / scale,
-                                     dy: (translation.y - lastPan.y) / scale,
+                receiver?.sendScroll(dx: delta.x / scale, dy: delta.y / scale,
                                      mods: wireMods)
-                lastPan = translation
             default:
                 twoFingerActive = false
             }
         }
 
         @objc func didLongPress(_ recognizer: UILongPressGestureRecognizer) {
-            guard recognizer.state == .began, !twoFingerActive,
+            guard recognizer.state == .began, !twoFingerActive, !pointerModeEnabled,
+                  receiver?.macSupportsKeyboardWire == true,
+                  !inputEngine.hasActivePen else { return }
+            rightClickAtDirectLocation(recognizer.location(in: self))
+        }
+
+        @objc func didTwoFingerTap(_ recognizer: UITapGestureRecognizer) {
+            guard recognizer.state == .ended, !twoFingerActive,
                   receiver?.macSupportsKeyboardWire == true,
                   !inputEngine.hasActivePen else { return }
             if pointerModeEnabled {
                 rightClickAtVirtualCursor()
                 return
             }
-            guard let norm = normalized(recognizer.location(in: self)) else { return }
+            rightClickAtDirectLocation(recognizer.location(in: self))
+        }
+
+        private func rightClickAtDirectLocation(_ point: CGPoint) {
+            guard let norm = normalized(point) else { return }
             if downSent {
                 receiver?.sendTouch(phase: "cancelled", x: lastNorm.x, y: lastNorm.y, mods: wireMods)
             }
@@ -393,7 +537,7 @@ struct VideoLayerView: UIViewRepresentable {
             }
             // Ignore single-finger events while a two-finger gesture runs,
             // and end the click if a second finger joins mid-press.
-            if twoFingerActive || fingersOnVideo(in: event) > 1 {
+            if twoFingerActive || liveFingersOnVideo(in: event) > 1 {
                 if downSent {
                     receiver?.sendTouch(phase: "cancelled", x: lastNorm.x, y: lastNorm.y,
                                         mods: wireMods)
@@ -470,7 +614,7 @@ struct VideoLayerView: UIViewRepresentable {
         private var pointerClickSuppressed = false
         private var pointerLastTapAt: TimeInterval = 0
 
-        private let pointerTapDuration: TimeInterval = 0.3
+        private let pointerTapDuration: TimeInterval = 0.5
         private let pointerTapSlop: CGFloat = 10
         private let pointerTapDragWindow: TimeInterval = 0.35
 
@@ -483,6 +627,7 @@ struct VideoLayerView: UIViewRepresentable {
             discardPendingDown()
             cancelPointerGesture()
             pointerLastTapAt = 0
+            rightClickActive = false
             virtualCursor = cursorNorm
         }
 

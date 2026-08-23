@@ -58,9 +58,13 @@ final class PhoneReceiver: ObservableObject {
 
     var macSupportsKeyboardWire: Bool { macProtocolVersion >= WireProtocol.keyboardWireVersion }
 
+    var macSupportsMacSizeWire: Bool { macProtocolVersion >= WireProtocol.macSizeWireVersion }
+
     @Published private(set) var panelInsets = UIEdgeInsets.zero
     private var queuePanelInsets = UIEdgeInsets.zero
     private var reserveSafeArea = UserDefaults.standard.object(forKey: "reserveSafeArea") as? Bool ?? true
+    private var screenSizeMode = UserDefaults.standard.string(forKey: "screenSizeMode") ?? "phone"
+    private var bottomObstruction: CGFloat = 0
 
     private var connection: NWConnection?
     private var dialGeneration = 0
@@ -180,12 +184,41 @@ final class PhoneReceiver: ObservableObject {
         }
     }
 
+    func setScreenSizeMode(_ mode: String) {
+        queue.async {
+            guard self.screenSizeMode != mode else { return }
+            self.screenSizeMode = mode
+            let panel = self.announcedPanel
+            Log.info("screen size mode -> \(mode), announcing \(panel.width)x\(panel.height)")
+            if let connection = self.connection { self.sendHello(on: connection) }
+        }
+    }
+
+    func setBottomObstruction(_ points: CGFloat) {
+        queue.async {
+            guard self.bottomObstruction != points else { return }
+            self.bottomObstruction = points
+            let panel = self.announcedPanel
+            Log.info("bottom obstruction -> \(points), announcing \(panel.width)x\(panel.height)")
+            if let connection = self.connection { self.sendHello(on: connection) }
+        }
+    }
+
+    private var isPortrait: Bool { devicePixelsHigh > devicePixelsWide }
+
     private var announcedPanel: (width: Int, height: Int) {
-        guard reserveSafeArea else { return (devicePixelsWide, devicePixelsHigh) }
-        let horizontal = Int(((queuePanelInsets.left + queuePanelInsets.right) * deviceScale).rounded())
-        let vertical = Int(((queuePanelInsets.top + queuePanelInsets.bottom) * deviceScale).rounded())
-        let width = max(2, devicePixelsWide - horizontal)
-        let height = max(2, devicePixelsHigh - vertical)
+        guard screenSizeMode != "mac" else { return (devicePixelsWide, devicePixelsHigh) }
+        var width = devicePixelsWide
+        var height = devicePixelsHigh
+        if reserveSafeArea {
+            width -= Int(((queuePanelInsets.left + queuePanelInsets.right) * deviceScale).rounded())
+            height -= Int(((queuePanelInsets.top + queuePanelInsets.bottom) * deviceScale).rounded())
+        }
+        if isPortrait {
+            height -= Int((bottomObstruction * deviceScale).rounded())
+        }
+        width = max(2, width)
+        height = max(2, height)
         return (width - width % 2, height - height % 2)
     }
 
@@ -440,6 +473,7 @@ final class PhoneReceiver: ObservableObject {
             "scale": deviceScale,
             "device": UIDevice.current.userInterfaceIdiom == .pad ? "iPad" : "iPhone",
             "id": Self.installID,
+            "sizeMode": screenSizeMode,
             "pv": WireProtocol.version,   // issue #132 — absent on old receivers
         ], on: conn)
         Log.info("hello sent")

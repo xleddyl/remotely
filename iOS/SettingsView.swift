@@ -8,6 +8,7 @@ struct SettingsView: View {
     @Environment(\.dismiss) private var dismiss
     @AppStorage("showAnalytics") private var showAnalytics = false
     @AppStorage("reserveSafeArea") private var reserveSafeArea = true
+    @AppStorage("screenSizeMode") private var screenSizeMode = "phone"
     @AppStorage("touchInputMode") private var touchInputMode = "pointer"
     @AppStorage("pointerSpeed") private var pointerSpeed = 1.0
     @AppStorage(StreamQuality.defaultsKey) private var streamQuality = StreamQuality.best.rawValue
@@ -60,9 +61,17 @@ struct SettingsView: View {
 
     private var displaySection: some View {
         Section {
+            Picker("Screen size", selection: $screenSizeMode) {
+                Text("This \(deviceKind)").tag("phone")
+                Text("Mac").tag("mac")
+            }
+            .pickerStyle(.menu)
+
             Toggle("Fit around the notch and corners", isOn: $reserveSafeArea)
         } header: {
             Text("Display")
+        } footer: {
+            Text("Mac size streams the Mac's own resolution, letterboxed to fit this screen. \(deviceKind) size fits the Mac display to this \(deviceKind) instead.")
         }
     }
 

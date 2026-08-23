@@ -108,9 +108,15 @@ final class InputController: ObservableObject {
     func toggleSoftKeyboard() { setSoftKeyboardVisible(!softKeyboardVisible) }
 
     func setSoftKeyboardVisible(_ visible: Bool) {
-        guard softKeyboardVisible != visible else { return }
-        softKeyboardVisible = visible
-        if visible { presentSoftKeyboard?() } else { dismissSoftKeyboard?() }
+        guard visible else {
+            let wasVisible = softKeyboardVisible
+            softKeyboardVisible = false
+            if wasVisible { dismissSoftKeyboard?() }
+            return
+        }
+        guard !softKeyboardVisible else { return }
+        softKeyboardVisible = true
+        presentSoftKeyboard?()
     }
 
     func reset() {
@@ -184,6 +190,13 @@ final class InputController: ObservableObject {
 }
 
 struct PerfOverlayHeightKey: PreferenceKey {
+    static var defaultValue: CGFloat = 0
+    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
+        value = max(value, nextValue())
+    }
+}
+
+struct DockedInputBarHeightKey: PreferenceKey {
     static var defaultValue: CGFloat = 0
     static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
         value = max(value, nextValue())
@@ -331,7 +344,6 @@ struct InputToolbar: View {
     private static let dragSpace = "inputToolbarDragSpace"
     private static let dragSlop: CGFloat = 10
     private static let flickProjection: CGFloat = 0.5
-    private static let chipDiameter: CGFloat = 38
     private static let modifierChipDiameter: CGFloat = 42
 
     private var corner: ToolbarCorner {
@@ -419,6 +431,7 @@ struct InputToolbar: View {
                 .frame(width: Self.modifierChipDiameter, height: Self.modifierChipDiameter)
                 .foregroundStyle(Color.white)
                 .liquidGlass(in: Circle(), tint: .accentColor)
+                .contentShape(Circle())
         }
         .buttonStyle(.plain)
         .transition(chipTransition)
@@ -432,10 +445,11 @@ struct InputToolbar: View {
             controller.setSoftKeyboardVisible(false)
         } label: {
             Image(systemName: "keyboard.chevron.compact.down")
-                .font(.system(size: 15, weight: .medium))
-                .frame(width: Self.chipDiameter, height: Self.chipDiameter)
-                .foregroundStyle(.primary)
-                .liquidGlass(in: Circle())
+                .font(.system(size: 16, weight: .semibold))
+                .frame(width: Self.modifierChipDiameter, height: Self.modifierChipDiameter)
+                .foregroundStyle(Color.white)
+                .liquidGlass(in: Circle(), tint: .accentColor)
+                .contentShape(Circle())
         }
         .buttonStyle(.plain)
         .transition(chipTransition)
@@ -558,6 +572,7 @@ struct DockedInputBar: View {
     let disconnect: () -> Void
 
     @AppStorage("touchInputMode") private var touchInputMode = "pointer"
+    @AppStorage("screenSizeMode") private var screenSizeMode = "phone"
 
     private static let buttonHeight: CGFloat = 34
     private static let buttonWidth: CGFloat = 40
@@ -649,6 +664,8 @@ struct DockedInputBar: View {
     private func builtinView(_ action: ToolbarBuiltin) -> some View {
         if action == .pointerMode {
             pointerModeButton
+        } else if action == .screenSize {
+            screenSizeButton
         } else if let modifier = action.modifier {
             modifierButton(modifier, glyph: action.glyph ?? "", name: action.title)
         } else if let key = action.key {
@@ -828,5 +845,18 @@ struct DockedInputBar: View {
         }
         .accessibilityLabel(trackpad ? "Trackpad mode" : "Touch mode")
         .accessibilityHint("Tap to switch input mode")
+    }
+
+    private var deviceSymbol: String { deviceKind == "iPad" ? "ipad" : "iphone" }
+
+    private var screenSizeButton: some View {
+        let macSize = screenSizeMode == "mac"
+        return keyButton(symbol: macSize ? "laptopcomputer" : deviceSymbol, active: macSize) {
+            screenSizeMode = macSize ? "phone" : "mac"
+            ToolbarHaptics.selectionHaptics.selectionChanged()
+        }
+        .accessibilityLabel(macSize ? "Mac screen size" : "\(deviceKind) screen size")
+        .accessibilityHint("Tap to switch the streamed screen size")
+        .accessibilityAddTraits(macSize ? [.isSelected] : [])
     }
 }

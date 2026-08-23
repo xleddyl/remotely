@@ -9,6 +9,7 @@ struct ReceiverScreen: View {
     @State private var showOnboarding = false
     @Environment(\.scenePhase) private var scenePhase
     @AppStorage("reserveSafeArea") private var reserveSafeArea = true
+    @AppStorage("screenSizeMode") private var screenSizeMode = "phone"
     // First-run onboarding (issue #49): explain the Mac app is required.
     // Shown until either the user dismisses it or the device connects once.
     @AppStorage("hasConnectedBefore") private var hasConnectedBefore = false
@@ -96,6 +97,7 @@ struct ReceiverScreen: View {
             model.appWillTerminate()
         }
         .onChange(of: reserveSafeArea) { model.receiver.setReserveSafeArea($0) }
+        .onChange(of: screenSizeMode) { model.receiver.setScreenSizeMode($0) }
         .onChange(of: model.receiver.macSupportsKeyboardWire) { supported in
             if !supported { model.input.reset() }
         }
@@ -143,6 +145,7 @@ private struct StreamingLayout: View {
     @State private var perfOverlayHeight: CGFloat = 0
     @State private var keyboardHeight: CGFloat = 0
     @State private var windowInsets = UIEdgeInsets.zero
+    @State private var inputBarHeight: CGFloat = 0
 
     private static let keyboardWillChange = NotificationCenter.default
         .publisher(for: UIResponder.keyboardWillChangeFrameNotification)
@@ -161,6 +164,12 @@ private struct StreamingLayout: View {
                                    collapse: collapse,
                                    openSettings: openSettings,
                                    disconnect: disconnect)
+                        .background(
+                            GeometryReader { barGeo in
+                                Color.clear.preference(key: DockedInputBarHeightKey.self,
+                                                       value: barGeo.size.height)
+                            }
+                        )
                         .transition(.move(edge: .bottom).combined(with: .opacity))
                 }
             }
@@ -174,7 +183,13 @@ private struct StreamingLayout: View {
             }
         }
         .onPreferenceChange(PerfOverlayHeightKey.self) { perfOverlayHeight = $0 }
-        .onAppear { refreshWindowInsets() }
+        .onPreferenceChange(DockedInputBarHeightKey.self) { inputBarHeight = $0 }
+        .onAppear {
+            refreshWindowInsets()
+            receiver.setBottomObstruction(bottomObstruction)
+        }
+        .onDisappear { receiver.setBottomObstruction(0) }
+        .onChange(of: bottomObstruction) { receiver.setBottomObstruction($0) }
         .onChange(of: safeArea) { _ in refreshWindowInsets() }
         .onReceive(Self.keyboardWillChange) { note in
             refreshWindowInsets()
@@ -207,6 +222,10 @@ private struct StreamingLayout: View {
                 .allowsHitTesting(false)   // never block touch input
             }
         }
+    }
+
+    private var bottomObstruction: CGFloat {
+        keyboardHeight + (input.expanded ? inputBarHeight : 0)
     }
 
     private var barBottomInset: CGFloat {

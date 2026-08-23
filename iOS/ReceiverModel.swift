@@ -53,6 +53,10 @@ final class ReceiverModel: ObservableObject {
         receiver.connect(to: target, name: endpoint.host)
     }
 
+    func connect(to endpoint: SavedEndpoint) {
+        connectManual(host: endpoint.host, port: endpoint.port)
+    }
+
     private struct InterruptedSession {
         let endpoint: NWEndpoint
         let name: String

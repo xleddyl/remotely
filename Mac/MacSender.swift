@@ -28,9 +28,11 @@ struct PhoneInfo: Decodable {
                           // the key the controller routes reconnects on
     let pv: Int?          // receiver protocol version (issue #132); absent on
                           // every pre-handshake install → treat as protocol 1
+    let sizeMode: String?
 
     var kind: String { device ?? "device" }
     var protocolVersion: Int { pv ?? WireProtocol.assumedWhenAbsent }
+    var wantsMacSize: Bool { sizeMode == "mac" }
 
     static let panelPixelRange = 320...20_000
     static let panelScaleRange = 1.0...4.0
@@ -40,6 +42,32 @@ struct PhoneInfo: Decodable {
             && Self.panelPixelRange.contains(pixelsHigh)
             && scale.isFinite
             && Self.panelScaleRange.contains(scale)
+    }
+
+    func resolvedTarget(excluding virtual: CGDirectDisplayID? = nil) -> PhoneInfo {
+        guard wantsMacSize else { return self }
+        let panel = MacPanel.pixelSize(excluding: virtual)
+        guard panel.width != pixelsWide || panel.height != pixelsHigh else { return self }
+        return PhoneInfo(pixelsWide: panel.width, pixelsHigh: panel.height, scale: scale,
+                         device: device, id: id, pv: pv, sizeMode: sizeMode)
+    }
+}
+
+enum MacPanel {
+
+    static let fallback = (width: 2880, height: 1800)
+
+    static func pixelSize(excluding virtual: CGDirectDisplayID?) -> (width: Int, height: Int) {
+        var count: UInt32 = 0
+        guard CGGetOnlineDisplayList(0, nil, &count) == .success, count > 0 else { return fallback }
+        var ids = [CGDirectDisplayID](repeating: 0, count: Int(count))
+        guard CGGetOnlineDisplayList(count, &ids, &count) == .success else { return fallback }
+        let online = Array(ids.prefix(Int(count)))
+        let chosen = online.first { CGDisplayIsBuiltin($0) != 0 }
+            ?? online.first { $0 != virtual }
+        guard let chosen, let mode = CGDisplayCopyDisplayMode(chosen),
+              mode.pixelWidth > 0, mode.pixelHeight > 0 else { return fallback }
+        return (mode.pixelWidth, mode.pixelHeight)
     }
 }
 
@@ -268,6 +296,16 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         self.baseIdentityOffset = identityOffset
         self.disconnectedSince = Date()
         super.init()
+        self.lastHello = effectiveHello(hello)
+    }
+
+    private func effectiveHello(_ info: PhoneInfo) -> PhoneInfo {
+        let target = info.resolvedTarget(excluding: virtualDisplay?.displayID)
+        if target.pixelsWide != info.pixelsWide || target.pixelsHigh != info.pixelsHigh {
+            Log.info("mac-size mode: \(info.pixelsWide)x\(info.pixelsHigh) announced, "
+                + "building \(target.pixelsWide)x\(target.pixelsHigh) from the Mac's panel")
+        }
+        return target
     }
 
     // MARK: - Lifecycle
@@ -1302,7 +1340,8 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         }
     }
 
-    private func applyHello(_ info: PhoneInfo) {
+    private func applyHello(_ raw: PhoneInfo) {
+        let info = effectiveHello(raw)
         let previous = lastHello
         lastHello = info
         Task { @MainActor in self.onHello?(info) }

@@ -92,12 +92,48 @@ struct IdleView: View {
     @ObservedObject var browser: MacBrowser
     @Binding var showSettings: Bool
 
-    @AppStorage("manualHost") private var manualHost = ""
-    @AppStorage("manualPort") private var manualPort = ManualEndpointParser.defaultPort
-    @State private var showAddressFields = false
+    @ObservedObject private var savedStore = SavedEndpointStore.shared
+    @ObservedObject private var knownMacStore = KnownMacStore.shared
+    @State private var endpointSheet: EndpointSheetMode?
 
-    private var validation: ManualEndpointValidation {
-        ManualEndpointParser.validate(host: manualHost, port: manualPort)
+    private enum EndpointSheetMode: Identifiable {
+        case add
+        case edit(SavedEndpoint)
+
+        var id: String {
+            switch self {
+            case .add: return "add"
+            case .edit(let endpoint): return endpoint.id.uuidString
+            }
+        }
+
+        var existing: SavedEndpoint? {
+            if case .edit(let endpoint) = self { return endpoint }
+            return nil
+        }
+    }
+
+    private enum MacListItem: Identifiable {
+        case reachable(DiscoveredMac)
+        case unreachable(KnownMac)
+
+        var id: String {
+            switch self {
+            case .reachable(let mac): return "r:\(mac.id)"
+            case .unreachable(let mac): return "u:\(mac.id)"
+            }
+        }
+    }
+
+    private var unreachableMacs: [KnownMac] {
+        let discoveredIDs = Set(browser.macs.map(\.id))
+        return knownMacStore.macs
+            .filter { !discoveredIDs.contains($0.id) }
+            .sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
+    }
+
+    private var macListItems: [MacListItem] {
+        browser.macs.map(MacListItem.reachable) + unreachableMacs.map(MacListItem.unreachable)
     }
 
     var body: some View {
@@ -120,6 +156,15 @@ struct IdleView: View {
         }
         .background(Color(.systemGroupedBackground))
         .scrollDismissesKeyboard(.interactively)
+        .sheet(item: $endpointSheet) { mode in
+            SavedEndpointEditorSheet(existing: mode.existing) { endpoint in
+                if mode.existing == nil {
+                    savedStore.add(endpoint)
+                } else {
+                    savedStore.update(endpoint)
+                }
+            }
+        }
     }
 
     private var header: some View {
@@ -145,12 +190,17 @@ struct IdleView: View {
         VStack(spacing: 0) {
             GroupedSectionHeader(text: "Macs on this network")
             GroupedCard {
-                if browser.macs.isEmpty {
+                if macListItems.isEmpty {
                     searchingRow
                 } else {
-                    ForEach(Array(browser.macs.enumerated()), id: \.element.id) { index, mac in
+                    ForEach(Array(macListItems.enumerated()), id: \.element.id) { index, item in
                         if index > 0 { GroupedRowDivider(inset: 52) }
-                        macRow(mac)
+                        switch item {
+                        case .reachable(let mac):
+                            macRow(mac)
+                        case .unreachable(let mac):
+                            unreachableMacRow(mac)
+                        }
                     }
                 }
             }
@@ -206,84 +256,133 @@ struct IdleView: View {
         .accessibilityLabel("Connect to \(mac.name)")
     }
 
-    private var addressSection: some View {
-        VStack(spacing: 0) {
-            GroupedSectionHeader(text: "Away from home")
-            GroupedCard {
-                disclosureRow
-                if showAddressFields {
-                    GroupedRowDivider()
-                    hostField
-                    GroupedRowDivider(inset: 16)
-                    portField
-                }
-            }
-            if showAddressFields {
-                if let problem = validation.problem, !manualHost.isEmpty {
-                    GroupedSectionFooter(text: problem.message, tint: Color.orange)
-                } else {
-                    GroupedSectionFooter(
-                        text: "Reach your Mac over Tailscale or a VPN when it is not on this network.")
-                }
-
-                Button {
-                    model.connectManual(host: manualHost, port: manualPort)
-                } label: {
-                    Text("Connect").frame(maxWidth: .infinity)
-                }
-                .buttonStyle(.borderedProminent)
-                .controlSize(.large)
-                .disabled(!validation.isValid || !receiver.isIdle)
-                .padding(.top, 16)
-            }
-        }
-    }
-
-    private var disclosureRow: some View {
-        Button {
-            withAnimation(.easeInOut(duration: 0.2)) { showAddressFields.toggle() }
-        } label: {
-            HStack(spacing: 12) {
-                Text("Connect by address")
-                    .font(.body)
-                    .foregroundStyle(.primary)
-                Spacer(minLength: 8)
-                Image(systemName: "chevron.right")
-                    .font(.footnote.weight(.semibold))
-                    .foregroundStyle(.tertiary)
-                    .rotationEffect(.degrees(showAddressFields ? 90 : 0))
-            }
-            .padding(.horizontal, 16)
-            .padding(.vertical, 12)
-        }
-        .buttonStyle(GroupedRowButtonStyle())
-        .accessibilityLabel("Connect by address")
-        .accessibilityHint(showAddressFields ? "Hides the address fields" : "Shows the address fields")
-    }
-
-    private var hostField: some View {
-        TextField("mac.tailnet-name.ts.net", text: $manualHost)
-            .font(.body)
-            .textInputAutocapitalization(.never)
-            .autocorrectionDisabled()
-            .keyboardType(.URL)
-            .padding(.horizontal, 16)
-            .padding(.vertical, 12)
-            .accessibilityLabel("Mac address")
-    }
-
-    private var portField: some View {
+    private func unreachableMacRow(_ mac: KnownMac) -> some View {
         HStack(spacing: 12) {
-            Text("Port")
+            Image(systemName: "laptopcomputer")
+                .font(.body.weight(.regular))
+                .foregroundStyle(.secondary)
+                .frame(width: 24, alignment: .leading)
+            Text(mac.name)
                 .font(.body)
-            TextField(ManualEndpointParser.defaultPort, text: $manualPort)
-                .font(.body)
-                .keyboardType(.numberPad)
-                .multilineTextAlignment(.trailing)
-                .accessibilityLabel("Port")
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
+            Spacer(minLength: 8)
+            Text("Not reachable")
+                .font(.footnote)
+                .foregroundStyle(.tertiary)
         }
         .padding(.horizontal, 16)
-        .padding(.vertical, 12)
+        .padding(.vertical, 14)
+        .contentShape(Rectangle())
+        .contextMenu {
+            Button(role: .destructive) {
+                knownMacStore.forget(mac)
+            } label: {
+                Label("Forget", systemImage: "trash")
+            }
+        }
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel("\(mac.name), not reachable")
+    }
+
+    private var addressSection: some View {
+        VStack(spacing: 0) {
+            addressSectionHeader
+            GroupedCard {
+                if savedStore.endpoints.isEmpty {
+                    emptyEndpointsRow
+                } else {
+                    ForEach(Array(savedStore.endpoints.enumerated()), id: \.element.id) { index, endpoint in
+                        if index > 0 { GroupedRowDivider(inset: 52) }
+                        savedEndpointRow(endpoint)
+                    }
+                }
+            }
+        }
+    }
+
+    private var addressSectionHeader: some View {
+        HStack(spacing: 8) {
+            Text("Away from home")
+                .font(.footnote.weight(.semibold))
+                .textCase(.uppercase)
+                .foregroundStyle(.secondary)
+            Spacer(minLength: 8)
+            Button {
+                endpointSheet = .add
+            } label: {
+                Image(systemName: "plus")
+                    .font(.footnote.weight(.semibold))
+                    .foregroundStyle(.secondary)
+                    .frame(width: 44, height: 44)
+                    .contentShape(Rectangle())
+            }
+            .accessibilityLabel("Add a Mac")
+        }
+        .padding(.leading, 16)
+        .padding(.bottom, 8)
+    }
+
+    private var emptyEndpointsRow: some View {
+        HStack(spacing: 12) {
+            Image(systemName: "network")
+                .font(.body)
+                .foregroundStyle(.secondary)
+                .frame(width: 24, alignment: .leading)
+            Text("Add a Mac to reach it when you are not on this network.")
+                .font(.body)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+                .frame(maxWidth: .infinity, alignment: .leading)
+        }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 14)
+    }
+
+    private func savedEndpointRow(_ endpoint: SavedEndpoint) -> some View {
+        Button {
+            model.connect(to: endpoint)
+        } label: {
+            HStack(spacing: 12) {
+                Image(systemName: "globe")
+                    .font(.body.weight(.regular))
+                    .foregroundStyle(.secondary)
+                    .frame(width: 24, alignment: .leading)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(endpoint.displayName)
+                        .font(.body)
+                        .foregroundStyle(.primary)
+                        .lineLimit(1)
+                    if !endpoint.name.isEmpty {
+                        Text(endpoint.displayAddress)
+                            .font(.footnote)
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
+                    }
+                }
+                Spacer(minLength: 8)
+                Image(systemName: "chevron.right")
+                    .font(.footnote)
+                    .foregroundStyle(.tertiary)
+            }
+            .padding(.horizontal, 16)
+            .padding(.vertical, 14)
+        }
+        .buttonStyle(GroupedRowButtonStyle())
+        .disabled(!receiver.isIdle)
+        .accessibilityLabel("Connect to \(endpoint.displayName)")
+        .contextMenu {
+            Button {
+                endpointSheet = .edit(endpoint)
+            } label: {
+                Label("Edit", systemImage: "pencil")
+            }
+            Button(role: .destructive) {
+                savedStore.remove(endpoint)
+            } label: {
+                Label("Remove", systemImage: "trash")
+            }
+        }
     }
 
     private var footer: some View {

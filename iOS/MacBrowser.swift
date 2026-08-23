@@ -69,7 +69,12 @@ final class MacBrowser: ObservableObject {
     private func publish(_ results: Set<NWBrowser.Result>) {
         let found = results.compactMap { Self.mac(from: $0) }
             .sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
-        DispatchQueue.main.async { self.macs = found }
+        DispatchQueue.main.async {
+            self.macs = found
+            for mac in found {
+                KnownMacStore.shared.upsert(id: mac.id, name: mac.name)
+            }
+        }
     }
 
     private func setSearching(_ value: Bool) {

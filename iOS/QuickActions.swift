@@ -2,6 +2,7 @@ import Foundation
 
 enum ToolbarBuiltin: String, Codable, CaseIterable, Identifiable {
     case pointerMode
+    case screenSize
     case command, option, control, shift
     case escape, tab, returnKey, forwardDelete
     case home, end, pageUp, pageDown
@@ -40,6 +41,7 @@ enum ToolbarBuiltin: String, Codable, CaseIterable, Identifiable {
     var title: String {
         switch self {
         case .pointerMode: return "Pointer mode"
+        case .screenSize: return "Screen size"
         case .command: return "Command"
         case .option: return "Option"
         case .control: return "Control"
@@ -62,6 +64,7 @@ enum ToolbarBuiltin: String, Codable, CaseIterable, Identifiable {
     var detail: String {
         switch self {
         case .pointerMode: return "Pointer mode: switches touch between tapping directly on the picture and using this device as a trackpad."
+        case .screenSize: return "Screen size: switches the stream between this device's shape and the Mac's own resolution."
         case .command: return "Command: latches ⌘ until you tap it again, so the next tap or keystroke carries it."
         case .option: return "Option: latches ⌥ until you tap it again, so the next tap or keystroke carries it."
         case .control: return "Control: latches ⌃ until you tap it again, so the next tap or keystroke carries it."
@@ -84,6 +87,7 @@ enum ToolbarBuiltin: String, Codable, CaseIterable, Identifiable {
     var symbol: String? {
         switch self {
         case .pointerMode: return "cursorarrow"
+        case .screenSize: return "laptopcomputer"
         case .returnKey: return "return"
         case .forwardDelete: return "delete.right"
         case .home: return "arrow.up.to.line"
@@ -113,6 +117,7 @@ enum ToolbarBuiltin: String, Codable, CaseIterable, Identifiable {
     var listSymbol: String {
         switch self {
         case .pointerMode: return "cursorarrow"
+        case .screenSize: return "laptopcomputer"
         case .command: return "command"
         case .option: return "option"
         case .control: return "control"
@@ -411,9 +416,11 @@ final class QuickActionStore: ObservableObject {
 
     static let shared = QuickActionStore()
     static let defaultsKey = "toolbarQuickActions"
+    static let screenSizeSeedKey = "screenSizeActionSeeded"
 
     static let defaultItems: [ToolbarActionItem] = [
         .builtin(.pointerMode),
+        .builtin(.screenSize),
         .separator,
         .builtin(.command),
         .builtin(.option),
@@ -435,7 +442,20 @@ final class QuickActionStore: ObservableObject {
 
     init(defaults: UserDefaults = .standard) {
         self.defaults = defaults
-        items = Self.stored(in: defaults) ?? Self.defaultItems
+        guard let stored = Self.stored(in: defaults) else {
+            items = Self.defaultItems
+            return
+        }
+        items = stored
+        seedScreenSizeAction()
+    }
+
+    private func seedScreenSizeAction() {
+        guard !defaults.bool(forKey: Self.screenSizeSeedKey),
+              !items.contains(where: { $0.builtin == .screenSize }) else { return }
+        defaults.set(true, forKey: Self.screenSizeSeedKey)
+        let pointerMode = items.firstIndex { $0.builtin == .pointerMode }
+        items.insert(.builtin(.screenSize), at: pointerMode.map { $0 + 1 } ?? 0)
     }
 
     func append(_ item: ToolbarActionItem) {
