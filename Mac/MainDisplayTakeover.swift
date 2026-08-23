@@ -73,16 +73,24 @@ final class MainDisplayTakeover {
     static let shared = MainDisplayTakeover()
 
     private static let markerKey = "mainDisplayTakeover"
+    private static let builtInBrightnessKey = "mainDisplayTakeoverBuiltInBrightness"
     private let blanksOwnScreens = UserDefaults.standard.object(forKey: "blankOwnScreens") == nil
         || UserDefaults.standard.bool(forKey: "blankOwnScreens")
+
+    private struct DimmedBuiltIn {
+        let displayID: CGDirectDisplayID
+        let previousBrightness: Float
+    }
 
     private var state = MainDisplayTakeoverState()
     private var covers: [CGDirectDisplayID: NSWindow] = [:]
     private var keepVisible: Set<CGDirectDisplayID> = []
     private var enforcementTimer: Timer?
     private var screenObserver: NSObjectProtocol?
+    private var dimmedBuiltIn: DimmedBuiltIn?
 
     func healAfterUncleanExit() {
+        restorePersistedBuiltInBrightness()
         guard UserDefaults.standard.array(forKey: Self.markerKey) != nil else { return }
         Log.info("main-display takeover marker found at launch — the last run left the "
             + "desktop rearranged; restoring it")
@@ -207,6 +215,54 @@ final class MainDisplayTakeover {
             window.orderOut(nil)
             covers[id] = nil
         }
+        refreshBuiltInDimming(covered: wanted)
+    }
+
+    private func refreshBuiltInDimming(covered: Set<CGDirectDisplayID>) {
+        guard let builtIn = covered.first(where: { CGDisplayIsBuiltin($0) != 0 }) else {
+            restoreBuiltInBrightness()
+            return
+        }
+        if let dimmed = dimmedBuiltIn, dimmed.displayID != builtIn {
+            restoreBuiltInBrightness()
+        }
+        guard dimmedBuiltIn == nil else {
+            if let current = DisplayBacklight.brightness(of: builtIn), current > 0 {
+                DisplayBacklight.setBrightness(0, on: builtIn)
+            }
+            return
+        }
+        guard let previous = DisplayBacklight.brightness(of: builtIn),
+              DisplayBacklight.setBrightness(0, on: builtIn) else { return }
+        dimmedBuiltIn = DimmedBuiltIn(displayID: builtIn, previousBrightness: previous)
+        UserDefaults.standard.set(previous, forKey: Self.builtInBrightnessKey)
+        Log.info("main-display takeover: built-in display \(builtIn) backlight off "
+            + "(brightness was \(previous))")
+    }
+
+    private func restoreBuiltInBrightness() {
+        guard let dimmed = dimmedBuiltIn else { return }
+        dimmedBuiltIn = nil
+        UserDefaults.standard.removeObject(forKey: Self.builtInBrightnessKey)
+        guard DisplayBacklight.setBrightness(dimmed.previousBrightness, on: dimmed.displayID) else {
+            Log.info("main-display takeover: could not put the backlight of built-in display "
+                + "\(dimmed.displayID) back to \(dimmed.previousBrightness)")
+            return
+        }
+        Log.info("main-display takeover: built-in display \(dimmed.displayID) backlight restored "
+            + "to \(dimmed.previousBrightness)")
+    }
+
+    private func restorePersistedBuiltInBrightness() {
+        guard UserDefaults.standard.object(forKey: Self.builtInBrightnessKey) != nil else { return }
+        let previous = UserDefaults.standard.float(forKey: Self.builtInBrightnessKey)
+        UserDefaults.standard.removeObject(forKey: Self.builtInBrightnessKey)
+        guard let builtIn = activeDisplays().first(where: { CGDisplayIsBuiltin($0) != 0 }) else {
+            return
+        }
+        guard DisplayBacklight.setBrightness(previous, on: builtIn) else { return }
+        Log.info("main-display takeover: the last run left the built-in display dark — its "
+            + "backlight is back at \(previous)")
     }
 
     private func makeCover() -> NSWindow {
@@ -225,6 +281,7 @@ final class MainDisplayTakeover {
     private func removeCovers() {
         covers.values.forEach { $0.orderOut(nil) }
         covers.removeAll()
+        restoreBuiltInBrightness()
     }
 
     private func startEnforcement() {

@@ -103,6 +103,7 @@ final class KeyboardInputView: UIView, UIKeyInput {
 
     var onText: ((String) -> Void)?
     var onKeyName: ((String) -> Void)?
+    var onWordDelete: (() -> Void)?
     var onPresses: ((Set<UIPress>, Bool) -> Bool)?
     var onResign: (() -> Void)?
 
@@ -115,6 +116,11 @@ final class KeyboardInputView: UIView, UIKeyInput {
     var smartQuotesType: UITextSmartQuotesType = .no
     var smartDashesType: UITextSmartDashesType = .no
     var smartInsertDeleteType: UITextSmartInsertDeleteType = .no
+    var isSecureTextEntry: Bool = true
+    var textContentType: UITextContentType! = UITextContentType(rawValue: "")
+
+    private var deleteStreak = 0
+    private var lastDeleteAt: CFTimeInterval = 0
 
     override var canBecomeFirstResponder: Bool { true }
 
@@ -129,7 +135,14 @@ final class KeyboardInputView: UIView, UIKeyInput {
     }
 
     func deleteBackward() {
-        onKeyName?("delete")
+        let now = CACurrentMediaTime()
+        deleteStreak = now - lastDeleteAt < 0.2 ? deleteStreak + 1 : 1
+        lastDeleteAt = now
+        if deleteStreak >= 15 {
+            onWordDelete?()
+        } else {
+            onKeyName?("delete")
+        }
     }
 
     override func resignFirstResponder() -> Bool {

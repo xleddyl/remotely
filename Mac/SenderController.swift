@@ -149,6 +149,11 @@ final class SenderController: ObservableObject {
             session.mainDisplayID = displayID
             self.refreshSessionPolicies()
         }
+        sender.onAudioStreamingChanged = { [weak self, weak session] active in
+            guard let self, let session else { return }
+            session.audioStreaming = active
+            self.refreshSessionPolicies()
+        }
         sender.onStats = { [weak session] mbps in
             session?.mbps = mbps
         }
@@ -231,6 +236,7 @@ final class SenderController: ObservableObject {
     private func refreshSessionPolicies() {
         refreshPowerPolicy()
         refreshMainDisplayTakeover()
+        refreshOutputMute()
     }
 
     /// The virtual display that should own the Mac's global origin: the first
@@ -247,6 +253,18 @@ final class SenderController: ObservableObject {
     private func refreshMainDisplayTakeover() {
         let visible = Set(sessions.compactMap { $0.failed ? nil : $0.mainDisplayID })
         MainDisplayTakeover.shared.update(primary: takeoverDisplayID, keepVisible: visible)
+    }
+
+    private var streamsAudioToADevice: Bool {
+        sessions.contains { !$0.failed && $0.linkUp && $0.audioStreaming }
+    }
+
+    private func refreshOutputMute() {
+        if streamsAudioToADevice {
+            OutputMuter.shared.engage()
+        } else {
+            OutputMuter.shared.release()
+        }
     }
 
     private func refreshPowerPolicy() {

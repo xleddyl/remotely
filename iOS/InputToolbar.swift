@@ -15,6 +15,16 @@ enum ToolbarHaptics {
 
 enum ToolbarMotion {
     static let expand = Animation.spring(response: 0.32, dampingFraction: 0.86)
+    static let chipAnimation = Animation.spring(response: 0.28, dampingFraction: 0.82)
+}
+
+enum ToolbarModifierChips {
+    static let all: [(WireModifiers, String, String)] = [
+        (.command, "⌘", "Command"),
+        (.option, "⌥", "Option"),
+        (.control, "⌃", "Control"),
+        (.shift, "⇧", "Shift"),
+    ]
 }
 
 extension View {
@@ -322,14 +332,7 @@ struct InputToolbar: View {
     private static let dragSlop: CGFloat = 10
     private static let flickProjection: CGFloat = 0.5
     private static let chipDiameter: CGFloat = 38
-    private static let chipAnimation = Animation.spring(response: 0.28, dampingFraction: 0.82)
-
-    private static let modifierChips: [(WireModifiers, String, String)] = [
-        (.command, "⌘", "Command"),
-        (.option, "⌥", "Option"),
-        (.control, "⌃", "Control"),
-        (.shift, "⇧", "Shift"),
-    ]
+    private static let modifierChipDiameter: CGFloat = 42
 
     private var corner: ToolbarCorner {
         ToolbarCorner(rawValue: dockedCorner) ?? .topTrailing
@@ -384,7 +387,7 @@ struct InputToolbar: View {
     private var latchedChips: some View {
         if supported {
             ToolbarGlassRow(spacing: 7) {
-                ForEach(Self.modifierChips, id: \.1) { modifier, glyph, name in
+                ForEach(ToolbarModifierChips.all, id: \.1) { modifier, glyph, name in
                     if controller.isLatched(modifier) {
                         modifierChip(modifier, glyph: glyph, name: name)
                     }
@@ -395,8 +398,8 @@ struct InputToolbar: View {
             }
             .frame(height: Self.handleDiameter)
             .environment(\.layoutDirection, .leftToRight)
-            .animation(Self.chipAnimation, value: controller.latched)
-            .animation(Self.chipAnimation, value: controller.softKeyboardVisible)
+            .animation(ToolbarMotion.chipAnimation, value: controller.latched)
+            .animation(ToolbarMotion.chipAnimation, value: controller.softKeyboardVisible)
         }
     }
 
@@ -412,8 +415,8 @@ struct InputToolbar: View {
             controller.toggleLatch(modifier)
         } label: {
             Text(glyph)
-                .font(.system(size: 16, weight: .semibold))
-                .frame(width: Self.chipDiameter, height: Self.chipDiameter)
+                .font(.system(size: 17, weight: .bold))
+                .frame(width: Self.modifierChipDiameter, height: Self.modifierChipDiameter)
                 .foregroundStyle(Color.white)
                 .liquidGlass(in: Circle(), tint: .accentColor)
         }
@@ -445,11 +448,12 @@ struct InputToolbar: View {
             .font(.system(size: 16, weight: .semibold))
             .frame(width: Self.handleDiameter, height: Self.handleDiameter)
             .foregroundStyle(handleTint)
-            .liquidGlass(in: Circle())
+            .liquidGlass(in: Circle(), tint: latchedActive ? .accentColor : nil)
             .shadow(color: .black.opacity(0.28), radius: 10, y: 4)
             .contentShape(Circle())
             .scaleEffect(dragging ? 1.12 : 1)
             .animation(.easeOut(duration: 0.12), value: dragging)
+            .animation(ToolbarMotion.chipAnimation, value: controller.latched)
             .environment(\.layoutDirection, .leftToRight)
             .gesture(dragGesture(in: size))
             .accessibilityElement()
@@ -527,9 +531,11 @@ struct InputToolbar: View {
                             : size.height - insets.bottom - half)
     }
 
+    private var latchedActive: Bool { supported && !controller.latched.isEmpty }
+
     private var handleTint: Color {
         if !supported { return .orange }
-        return controller.latched.isEmpty ? .primary : .accentColor
+        return controller.latched.isEmpty ? .primary : .white
     }
 }
 
@@ -551,7 +557,7 @@ struct DockedInputBar: View {
     let openSettings: () -> Void
     let disconnect: () -> Void
 
-    @AppStorage("touchInputMode") private var touchInputMode = "direct"
+    @AppStorage("touchInputMode") private var touchInputMode = "pointer"
 
     private static let buttonHeight: CGFloat = 34
     private static let buttonWidth: CGFloat = 40
@@ -561,6 +567,7 @@ struct DockedInputBar: View {
     private static let chipVerticalPadding: CGFloat = 6
     private static let scrollerHeight: CGFloat = collapseDiameter + chipVerticalPadding * 2
     private static let containerVerticalPadding: CGFloat = 4
+    private static let latchedSummaryChipDiameter: CGFloat = 34
 
     private var chipShape: Capsule { Capsule(style: .continuous) }
 
@@ -572,6 +579,7 @@ struct DockedInputBar: View {
         HStack(spacing: Self.spacing) {
             collapseButton
             if supported {
+                latchedSummary
                 actionScroller
             } else {
                 unsupportedNote
@@ -677,11 +685,43 @@ struct DockedInputBar: View {
             Image(systemName: "chevron.down")
                 .font(.system(size: 16, weight: .semibold))
                 .frame(width: Self.collapseDiameter, height: Self.collapseDiameter)
-                .foregroundStyle(controller.latched.isEmpty ? Color.primary : Color.accentColor)
-                .liquidGlass(in: Circle())
+                .foregroundStyle(controller.latched.isEmpty ? Color.primary : Color.white)
+                .liquidGlass(in: Circle(), tint: controller.latched.isEmpty ? nil : .accentColor)
+                .animation(ToolbarMotion.chipAnimation, value: controller.latched)
         }
         .buttonStyle(.plain)
         .accessibilityLabel("Hide input controls")
+    }
+
+    @ViewBuilder
+    private var latchedSummary: some View {
+        if !controller.latched.isEmpty {
+            HStack(spacing: Self.spacing) {
+                ForEach(ToolbarModifierChips.all, id: \.1) { modifier, glyph, name in
+                    if controller.isLatched(modifier) {
+                        latchedSummaryChip(modifier, glyph: glyph, name: name)
+                    }
+                }
+            }
+            .animation(ToolbarMotion.chipAnimation, value: controller.latched)
+        }
+    }
+
+    private func latchedSummaryChip(_ modifier: WireModifiers, glyph: String, name: String) -> some View {
+        Button {
+            ToolbarHaptics.selectionHaptics.selectionChanged()
+            controller.toggleLatch(modifier)
+        } label: {
+            Text(glyph)
+                .font(.system(size: 15, weight: .bold))
+                .frame(width: Self.latchedSummaryChipDiameter, height: Self.latchedSummaryChipDiameter)
+                .foregroundStyle(Color.white)
+                .liquidGlass(in: Circle(), tint: .accentColor, interactive: false)
+        }
+        .buttonStyle(.plain)
+        .transition(.scale(scale: 0.4, anchor: .leading).combined(with: .opacity))
+        .accessibilityLabel("\(name) active")
+        .accessibilityHint("Tap to release")
     }
 
     private var settingsButton: some View {
@@ -781,12 +821,12 @@ struct DockedInputBar: View {
     }
 
     private var pointerModeButton: some View {
-        let active = touchInputMode == "pointer"
-        return keyButton(symbol: "cursorarrow", active: active) {
-            touchInputMode = active ? "direct" : "pointer"
+        let trackpad = touchInputMode == "pointer"
+        return keyButton(symbol: trackpad ? "cursorarrow" : "hand.tap") {
+            touchInputMode = trackpad ? "direct" : "pointer"
             ToolbarHaptics.selectionHaptics.selectionChanged()
         }
-        .accessibilityLabel("Pointer mode")
-        .accessibilityAddTraits(active ? [.isSelected] : [])
+        .accessibilityLabel(trackpad ? "Trackpad mode" : "Touch mode")
+        .accessibilityHint("Tap to switch input mode")
     }
 }

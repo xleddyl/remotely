@@ -27,7 +27,8 @@ struct VideoLayerView: UIViewRepresentable {
     let displayLayer: AVSampleBufferDisplayLayer
     let receiver: PhoneReceiver
     let input: InputController
-    @AppStorage("touchInputMode") var touchInputMode = "direct"
+    @AppStorage("touchInputMode") var touchInputMode = "pointer"
+    @AppStorage("pointerSpeed") var pointerSpeed = 1.0
 
     func makeUIView(context: Context) -> VideoView {
         let view = VideoView()
@@ -36,6 +37,7 @@ struct VideoLayerView: UIViewRepresentable {
         view.receiver = receiver
         view.input = input
         view.pointerModeEnabled = touchInputMode == "pointer"
+        view.pointerSpeed = pointerSpeed
 
         displayLayer.frame = view.bounds
         view.layer.addSublayer(displayLayer)
@@ -81,6 +83,7 @@ struct VideoLayerView: UIViewRepresentable {
 
     func updateUIView(_ uiView: VideoView, context: Context) {
         uiView.pointerModeEnabled = touchInputMode == "pointer"
+        uiView.pointerSpeed = pointerSpeed
         // videoSize arrives after the format description — re-fit the layers.
         uiView.setNeedsLayout()
     }
@@ -89,6 +92,7 @@ struct VideoLayerView: UIViewRepresentable {
         weak var receiver: PhoneReceiver?
         weak var input: InputController?
         var pointerModeEnabled = false { didSet { pointerModeDidChange(from: oldValue) } }
+        var pointerSpeed: Double = 1.0
         let inputEngine = InputCaptureEngine()
         private let keyboardInput = KeyboardInputView()
 
@@ -99,6 +103,7 @@ struct VideoLayerView: UIViewRepresentable {
             addSubview(keyboardInput)
             keyboardInput.onText = { [weak self] text in self?.input?.insertText(text) }
             keyboardInput.onKeyName = { [weak self] name in self?.input?.tapKey(name) }
+            keyboardInput.onWordDelete = { [weak self] in self?.input?.tapCombo(mods: [.option], key: "delete") }
             keyboardInput.onPresses = { [weak self] presses, down in
                 self?.input?.handlePresses(presses, down: down, allowText: false) ?? false
             }
@@ -582,10 +587,11 @@ struct VideoLayerView: UIViewRepresentable {
         private func movePointer(_ touch: UITouch, _ event: UIEvent?) {
             guard let rect = videoRect(), rect.width > 0, rect.height > 0 else { return }
             let mods = wireMods
+            let speed = CGFloat(pointerSpeed)
             for sample in event?.samples(for: touch) ?? [touch] {
                 let point = sample.location(in: self)
-                let dx = (point.x - pointerLastPoint.x) / rect.width
-                let dy = (point.y - pointerLastPoint.y) / rect.height
+                let dx = (point.x - pointerLastPoint.x) / rect.width * speed
+                let dy = (point.y - pointerLastPoint.y) / rect.height * speed
                 pointerLastPoint = point
                 virtualCursor = CGPoint(x: clamp01(virtualCursor.x + dx),
                                         y: clamp01(virtualCursor.y + dy))

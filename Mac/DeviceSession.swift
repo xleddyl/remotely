@@ -13,6 +13,7 @@ final class DeviceSession: ObservableObject, Identifiable {
     // The virtual display this session wants at the Mac's global origin,
     // reported by the sender once its capture is live.
     var mainDisplayID: CGDirectDisplayID?
+    var audioStreaming = false
     let startedAt = Date()
 
     @Published var status = "Starting…"

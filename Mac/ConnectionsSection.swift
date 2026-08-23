@@ -59,9 +59,6 @@ struct SessionRow: View {
                     Text(session.resolution)
                         .font(.system(.caption, design: .monospaced))
                         .foregroundStyle(.secondary)
-                    Text(session.startedAt, style: .timer)
-                        .font(.system(.caption, design: .monospaced))
-                        .foregroundStyle(.secondary)
                 }
                 Text(session.status)
                     .font(.caption)
@@ -69,11 +66,6 @@ struct SessionRow: View {
                     .lineLimit(2)
             }
             Spacer()
-            if session.mbps > 0, session.linkUp {
-                Text("\(String(format: "%.1f", session.mbps)) Mbit/s")
-                    .font(.system(.caption, design: .monospaced))
-                    .foregroundStyle(.secondary)
-            }
             Button("Disconnect") { controller.disconnect(session) }
                 .controlSize(.small)
                 .help("Drop this device now. It can connect again from its own screen.")

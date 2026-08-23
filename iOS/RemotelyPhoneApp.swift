@@ -9,9 +9,22 @@ let macAppURL = URL(string: "https://github.com/xleddyl/remotely")!
 
 @main
 struct RemotelyPhoneApp: App {
+    @AppStorage("appTheme") private var appTheme = "system"
+
+    init() {
+        let defaults = UserDefaults.standard
+        if !defaults.bool(forKey: "migratedTrackpadDefault") {
+            if defaults.string(forKey: "touchInputMode") == "direct" {
+                defaults.set("pointer", forKey: "touchInputMode")
+            }
+            defaults.set(true, forKey: "migratedTrackpadDefault")
+        }
+    }
+
     var body: some Scene {
         WindowGroup {
             ReceiverScreen()
+                .preferredColorScheme(appTheme == "light" ? .light : appTheme == "dark" ? .dark : nil)
         }
     }
 }

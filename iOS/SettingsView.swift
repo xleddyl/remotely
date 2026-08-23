@@ -8,9 +8,11 @@ struct SettingsView: View {
     @Environment(\.dismiss) private var dismiss
     @AppStorage("showAnalytics") private var showAnalytics = false
     @AppStorage("reserveSafeArea") private var reserveSafeArea = true
-    @AppStorage("touchInputMode") private var touchInputMode = "direct"
+    @AppStorage("touchInputMode") private var touchInputMode = "pointer"
+    @AppStorage("pointerSpeed") private var pointerSpeed = 1.0
     @AppStorage(StreamQuality.defaultsKey) private var streamQuality = StreamQuality.best.rawValue
     @AppStorage(StreamPrefs.audioDefaultsKey) private var playMacAudio = true
+    @AppStorage("appTheme") private var appTheme = "system"
 
     private var version: String {
         Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "dev"
@@ -21,6 +23,7 @@ struct SettingsView: View {
             Form {
                 streamingSection
                 displaySection
+                appearanceSection
                 touchInputSection
                 toolbarSection
                 analyticsSection
@@ -63,6 +66,19 @@ struct SettingsView: View {
         }
     }
 
+    private var appearanceSection: some View {
+        Section {
+            Picker("Theme", selection: $appTheme) {
+                Text("System").tag("system")
+                Text("Light").tag("light")
+                Text("Dark").tag("dark")
+            }
+            .pickerStyle(.menu)
+        } header: {
+            Text("Appearance")
+        }
+    }
+
     private var touchInputSection: some View {
         Section {
             Picker("Mode", selection: $touchInputMode) {
@@ -70,8 +86,20 @@ struct SettingsView: View {
                 Text("Trackpad").tag("pointer")
             }
             .pickerStyle(.menu)
+
+            if touchInputMode == "pointer" {
+                HStack {
+                    Text("Pointer speed")
+                    Slider(value: $pointerSpeed, in: 0.5...3.0, step: 0.25)
+                    Text(String(format: "%.2gx", pointerSpeed))
+                        .monospacedDigit()
+                        .foregroundStyle(.secondary)
+                }
+            }
         } header: {
             Text("Touch input")
+        } footer: {
+            Text("Pointer speed applies to trackpad mode. 1x moves the cursor exactly with your finger.")
         }
     }
 

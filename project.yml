@@ -62,6 +62,13 @@ targets:
         Debug:
           PRODUCT_BUNDLE_IDENTIFIER: com.xleddyl.remotely.mac.debug
           BUNDLE_DISPLAY_NAME: Remotely Dev
+    postBuildScripts:
+      - name: Stamp archive build number
+        basedOnDependencyAnalysis: false
+        script: |
+          if [ "$ACTION" = "install" ]; then
+            /usr/libexec/PlistBuddy -c "Set :CFBundleVersion $(date +%y%m%d%H%M)" "$TARGET_BUILD_DIR/$INFOPLIST_PATH"
+          fi
   RemotelyiOS:
     type: application
     platform: iOS

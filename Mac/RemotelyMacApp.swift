@@ -49,6 +49,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     // arrangement undone before this process is gone.
     func applicationWillTerminate(_ notification: Notification) {
         MainDisplayTakeover.shared.releaseNow()
+        OutputMuter.shared.release()
     }
 
     // Background/Dock modes: opening the app again (Spotlight, Finder, Dock

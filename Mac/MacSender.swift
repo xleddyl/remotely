@@ -79,12 +79,14 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
     // session and recomputes the takeover from the whole session list — this
     // is a state report, not a command.
     @MainActor var onMainDisplayChanged: ((CGDirectDisplayID?) -> Void)?
+    @MainActor var onAudioStreamingChanged: ((Bool) -> Void)?
     @MainActor var onPrefs: ((StreamPrefs) -> Void)?
 
     private var stream: SCStream?
     private var encoder: VTCompressionSession?
     private var audioStreamer: AudioStreamer?
     private var audioRequested = false
+    private var audioStreamingReported = false
     private var connection: NWConnection?
     private var virtualDisplay: VirtualDisplay?
     private let queue = DispatchQueue(label: "sender.video")
@@ -628,6 +630,7 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
             if audio != nil {
                 Log.info("audio streamer attached to the new capture, enabled=\(self.audioRequested)")
             }
+            self.reportAudioStreaming()
         }
         captureDisplayID = display.displayID
         lastCaptureTarget = (display.displayID, pixelsWide, pixelsHigh)
@@ -651,6 +654,7 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         // Belt and braces: the controller already recomputes the takeover from
         // its session list, but a stopped sender never owns the origin again.
         reportMainDisplay(nil)
+        Task { @MainActor in self.onAudioStreamingChanged?(false) }
         queue.async {
             self.inputInjector?.releaseHeldButtons()
             self.invalidateCapturePipeline(discardingLastFrame: true)
@@ -683,6 +687,7 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
     private func teardownAudio() {
         audioStreamer?.stop()
         audioStreamer = nil
+        reportAudioStreaming()
     }
 
     private func setAudioRequested(_ value: Bool) {
@@ -691,6 +696,14 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         Log.info("device audio \(value ? "on" : "off") (peer pv=\(lastHello.protocolVersion), "
             + "capture \(audioStreamer == nil ? "not carrying audio yet" : "live"))")
         audioStreamer?.setEnabled(value)
+        reportAudioStreaming()
+    }
+
+    private func reportAudioStreaming() {
+        let active = audioStreamer != nil && audioRequested && !stopped
+        guard active != audioStreamingReported else { return }
+        audioStreamingReported = active
+        Task { @MainActor in self.onAudioStreamingChanged?(active) }
     }
 
     private func onQueue(_ body: @escaping () -> Void) async {
