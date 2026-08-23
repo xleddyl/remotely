@@ -33,6 +33,13 @@ final class SenderController: ObservableObject {
     @Published var lockOnDisconnect = UserDefaults.standard.bool(forKey: "lockOnDisconnect") {
         didSet { UserDefaults.standard.set(lockOnDisconnect, forKey: "lockOnDisconnect") }
     }
+    @Published var blockLocalInput = UserDefaults.standard.object(forKey: "blockLocalInput") == nil
+        || UserDefaults.standard.bool(forKey: "blockLocalInput") {
+        didSet {
+            UserDefaults.standard.set(blockLocalInput, forKey: "blockLocalInput")
+            refreshLocalInputBlock()
+        }
+    }
 
     var running: Bool { !sessions.isEmpty }
 
@@ -44,7 +51,6 @@ final class SenderController: ObservableObject {
     }
     private var wasHoldingForSessions = false
     private var idleLockGeneration = 0
-    private let idleLockDelay: TimeInterval = 3
 
     private var dismissedUntil: [String: Date] = [:]
     private let dismissalCooldown: TimeInterval = 30
@@ -237,6 +243,7 @@ final class SenderController: ObservableObject {
         refreshPowerPolicy()
         refreshMainDisplayTakeover()
         refreshOutputMute()
+        refreshLocalInputBlock()
     }
 
     /// The virtual display that should own the Mac's global origin: the first
@@ -267,6 +274,14 @@ final class SenderController: ObservableObject {
         }
     }
 
+    private func refreshLocalInputBlock() {
+        if blockLocalInput, takeoverDisplayID != nil {
+            LocalInputBlocker.shared.engage()
+        } else {
+            LocalInputBlocker.shared.release()
+        }
+    }
+
     private func refreshPowerPolicy() {
         PowerManager.shared.update(activeSessions: streamingSessionCount)
         let active = activeSessionCount
@@ -283,7 +298,7 @@ final class SenderController: ObservableObject {
         guard lockOnDisconnect else { return }
         idleLockGeneration &+= 1
         let generation = idleLockGeneration
-        DispatchQueue.main.asyncAfter(deadline: .now() + idleLockDelay) { [weak self] in
+        DispatchQueue.main.async { [weak self] in
             guard let self, generation == self.idleLockGeneration,
                   self.lockOnDisconnect, self.activeSessionCount == 0 else { return }
             Log.info("last session ended, locking the screen")

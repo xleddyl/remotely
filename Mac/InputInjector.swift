@@ -19,6 +19,68 @@ private enum SystemClickMetrics {
     }()
 }
 
+/// Tracks a synthetic click chain (down→up pairs) the way the Window Server
+/// tracks real ones, so pen and finger input both get correct double/triple
+/// click state even though neither source gets click state from the system.
+private final class ClickChain {
+    private struct Session {
+        let downLocation: CGPoint
+        let clickState: Int
+    }
+
+    private struct CompletedClick {
+        let upTime: CFAbsoluteTime
+        let downLocation: CGPoint
+        let clickState: Int
+    }
+
+    private var session: Session?
+    private var lastClick: CompletedClick?
+
+    func begin(at point: CGPoint) -> Int {
+        let state = clickState(for: point)
+        session = Session(downLocation: point, clickState: state)
+        return state
+    }
+
+    /// Returns click state for the matching mouse-up. Extends the multi-click
+    /// chain only when down→up displacement is within the system threshold.
+    func finish(at upLocation: CGPoint) -> Int {
+        guard let session else { return 1 }
+        self.session = nil
+
+        let dx = upLocation.x - session.downLocation.x
+        let dy = upLocation.y - session.downLocation.y
+        if hypot(dx, dy) <= SystemClickMetrics.distance {
+            lastClick = CompletedClick(
+                upTime: CFAbsoluteTimeGetCurrent(),
+                downLocation: session.downLocation,
+                clickState: session.clickState
+            )
+        } else {
+            lastClick = nil
+        }
+        return session.clickState
+    }
+
+    func breakChain() {
+        session = nil
+        lastClick = nil
+    }
+
+    private func clickState(for point: CGPoint) -> Int {
+        let now = CFAbsoluteTimeGetCurrent()
+        guard let last = lastClick,
+              now - last.upTime <= SystemClickMetrics.interval else {
+            return 1
+        }
+        let dx = point.x - last.downLocation.x
+        let dy = point.y - last.downLocation.y
+        guard hypot(dx, dy) <= SystemClickMetrics.distance else { return 1 }
+        return last.clickState + 1
+    }
+}
+
 /// Turns normalized touch coordinates from the phone into mouse events on a
 /// target display. Touch semantics: finger down = left button down, finger
 /// move = drag, finger up = button up — i.e. the phone acts as a touchscreen.
@@ -42,28 +104,20 @@ final class InputInjector {
     private let capabilityMask: Int64 = 0x05C7       // pressure + tilt + rotation + buttons
     private var inRange = false
 
-    // Pencil-only synthetic click counting — tablet events don't get click
+    // Synthetic click counting for pen and finger input — neither gets click
     // state from the Window Server, so we mirror macOS double-click prefs here.
-    private struct PenClickSession {
-        let downLocation: CGPoint
-        let clickState: Int
-    }
-
-    private struct PenCompletedClick {
-        let upTime: CFAbsoluteTime
-        let downLocation: CGPoint
-        let clickState: Int
-    }
-
-    private var penClickSession: PenClickSession?
-    private var penLastClick: PenCompletedClick?
+    private let penClickChain = ClickChain()
+    private let touchClickChain = ClickChain()
     private var heldButtons: Set<String> = []
     private var heldKeyCodes: Set<CGKeyCode> = []
     private let layoutStore: KeyboardLayoutStore
 
+    static let injectionTag: Int64 = 0x52454D54
+
     init(displayID: CGDirectDisplayID, layoutStore: KeyboardLayoutStore = .shared) {
         self.displayID = displayID
         self.layoutStore = layoutStore
+        source?.userData = Self.injectionTag
         layoutStore.startTracking()
     }
 
@@ -97,17 +151,20 @@ final class InputInjector {
         case "began":
             type = .leftMouseDown
             isDown = true
+            clickState = touchClickChain.begin(at: point)
         case "moved":
             type = isDown ? .leftMouseDragged : .mouseMoved
         case "ended":
             guard isDown else { return }   // spurious up without a down
             type = .leftMouseUp
             isDown = false
+            clickState = touchClickChain.finish(at: point)
         case "cancelled":
             guard isDown else { return }
             type = .leftMouseUp
             isDown = false
             clickState = 0
+            touchClickChain.breakChain()
         default:
             return
         }
@@ -265,9 +322,10 @@ final class InputInjector {
         }
     }
 
+    private static let chordMasks: CGEventFlags = [.maskShift, .maskControl, .maskAlternate, .maskCommand]
+
     private func applyFlags(_ mods: Int, to event: CGEvent) {
-        guard mods != 0 else { return }
-        event.flags = event.flags.union(Self.eventFlags(mods))
+        event.flags = event.flags.subtracting(Self.chordMasks).union(Self.eventFlags(mods))
     }
 
     private static func eventFlags(_ mods: Int) -> CGEventFlags {
@@ -383,52 +441,14 @@ final class InputInjector {
         ev.setDoubleValueField(.tabletEventRotation, value: rotation)
         switch phase {
         case .down:
-            ev.setIntegerValueField(.mouseEventClickState, value: Int64(beginPenClickSession(at: p)))
+            ev.setIntegerValueField(.mouseEventClickState, value: Int64(penClickChain.begin(at: p)))
         case .up:
-            ev.setIntegerValueField(.mouseEventClickState, value: Int64(finishPenClickSession(at: p)))
+            ev.setIntegerValueField(.mouseEventClickState, value: Int64(penClickChain.finish(at: p)))
         case .drag, .hover:
             break
         }
         ev.flags = .maskNonCoalesced
         ev.post(tap: .cghidEventTap)
-    }
-
-    private func penClickStateForMouseDown(at point: CGPoint) -> Int {
-        let now = CFAbsoluteTimeGetCurrent()
-        guard let last = penLastClick,
-              now - last.upTime <= SystemClickMetrics.interval else {
-            return 1
-        }
-        let dx = point.x - last.downLocation.x
-        let dy = point.y - last.downLocation.y
-        guard hypot(dx, dy) <= SystemClickMetrics.distance else { return 1 }
-        return last.clickState + 1
-    }
-
-    private func beginPenClickSession(at point: CGPoint) -> Int {
-        let state = penClickStateForMouseDown(at: point)
-        penClickSession = PenClickSession(downLocation: point, clickState: state)
-        return state
-    }
-
-    /// Returns click state for the matching pen mouse-up. Extends the multi-click
-    /// chain only when down→up displacement is within the system threshold.
-    private func finishPenClickSession(at upLocation: CGPoint) -> Int {
-        guard let session = penClickSession else { return 1 }
-        penClickSession = nil
-
-        let dx = upLocation.x - session.downLocation.x
-        let dy = upLocation.y - session.downLocation.y
-        if hypot(dx, dy) <= SystemClickMetrics.distance {
-            penLastClick = PenCompletedClick(
-                upTime: CFAbsoluteTimeGetCurrent(),
-                downLocation: session.downLocation,
-                clickState: session.clickState
-            )
-        } else {
-            penLastClick = nil
-        }
-        return session.clickState
     }
 
     /// UIKit altitude is radians from the surface (pi/2 = upright); CGEvent tilt

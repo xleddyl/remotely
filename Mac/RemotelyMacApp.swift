@@ -50,6 +50,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationWillTerminate(_ notification: Notification) {
         MainDisplayTakeover.shared.releaseNow()
         OutputMuter.shared.release()
+        LocalInputBlocker.shared.release()
     }
 
     // Background/Dock modes: opening the app again (Spotlight, Finder, Dock

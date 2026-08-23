@@ -20,6 +20,18 @@ struct GeneralSection: View {
             }
 
             VStack(alignment: .leading, spacing: 4) {
+                Toggle("Block this Mac's keyboard and mouse while a device is connected",
+                       isOn: $controller.blockLocalInput)
+                if controller.blockLocalInput {
+                    Text("While a device is connected, this Mac's own keyboard, trackpad and mouse "
+                         + "do nothing. Hold Esc on the Mac for 3 seconds to unlock them until the "
+                         + "device disconnects.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+            }
+
+            VStack(alignment: .leading, spacing: 4) {
                 Toggle("Lock this Mac when the last device disconnects", isOn: $controller.lockOnDisconnect)
                 if controller.lockOnDisconnect {
                     Text("A few seconds after the last connected device disconnects, this Mac's "
