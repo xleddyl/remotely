@@ -17,16 +17,8 @@ display.
 
 ## Building
 
-The Xcode project is generated with [XcodeGen](https://github.com/yonaskolb/XcodeGen)
-from `project.yml`, so it is not committed.
-
-```sh
-xcodegen generate
-```
-
-This produces `Remotely.xcodeproj` with two schemes, `RemotelyMac` and
-`RemotelyiOS`. Open the project in Xcode and build both, or use `xcodebuild`
-directly:
+Open `Remotely.xcodeproj` in Xcode and build the `RemotelyMac` and
+`RemotelyiOS` schemes, or use `xcodebuild` directly:
 
 ```sh
 xcodebuild build -project Remotely.xcodeproj -scheme RemotelyMac -destination 'platform=macOS'

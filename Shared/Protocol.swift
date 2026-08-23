@@ -1,4 +1,4 @@
-// Compiled into BOTH the Mac and iOS targets (see project.yml `sources`).
+// Compiled into BOTH the Mac and iOS targets.
 // Keep this Foundation-only so it stays platform-neutral.
 
 import Foundation

@@ -7,7 +7,7 @@ cd "$(dirname "$0")"
 
 APP=build/Build/Products/Debug/Remotely.app
 if [[ ! -d $APP ]]; then
-  echo "Mac app not built. Run: xcodegen generate && xcodebuild -project Remotely.xcodeproj -scheme RemotelyMac -configuration Debug -derivedDataPath build build"
+  echo "Mac app not built. Run: xcodebuild -project Remotely.xcodeproj -scheme RemotelyMac -configuration Debug -derivedDataPath build build"
   exit 1
 fi
 
